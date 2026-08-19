@@ -186,3 +186,9 @@ reports-*/
 
 # Optional live-test per-case reports
 tests/optional/**/output/
+
+#trace data
+data/
+
+#config files
+weka-modified.yaml

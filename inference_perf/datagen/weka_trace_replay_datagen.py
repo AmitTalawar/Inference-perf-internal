@@ -221,6 +221,7 @@ class HashIdRandomGenerator:
         return self._rng.choice(seq)
 
 
+# NOTE: How is this related to decode_token_blocks?
 def sample_tokens_from_corpus(
     corpus: List[int],
     num_tokens: int,
@@ -646,21 +647,31 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         self.initialize_sessions(sessions)
 
     def _load_weka_traces(self) -> List[WekaTrace]:
-        """Loads traces from directories, files, or Hugging Face dataset."""
+        """Loads traces from local files/dirs or a Hugging Face dataset.
+
+        Local sources support:
+        - `.json`: one Weka trace object per file
+        - `.jsonl`: one Weka trace object per line
+        """
         raw_traces: List[WekaTrace] = []
 
         if self.weka_config.trace_directory:
             trace_dir = Path(self.weka_config.trace_directory)
             if not trace_dir.exists() or not trace_dir.is_dir():
                 raise ValueError(f"Trace directory does not exist or is not a directory: {trace_dir}")
-            files = sorted(trace_dir.glob("*.json"))
+            files = sorted(list(trace_dir.glob("*.json")) + list(trace_dir.glob("*.jsonl")))
             if not files:
-                raise ValueError(f"No JSON files found in {trace_dir}")
+                raise ValueError(f"No JSON/JSONL files found in {trace_dir}")
 
+            max_entries = self.weka_config.num_dataset_entries
             for f in files:
+                if len(raw_traces) >= max_entries:
+                    break
                 try:
-                    blob = json.loads(f.read_text(encoding="utf-8"))
-                    raw_traces.append(WekaTrace.model_validate(blob))
+                    traces_in_file = self._load_traces_from_local_file(f)
+                    remaining = max_entries - len(raw_traces)
+                    if remaining > 0:
+                        raw_traces.extend(traces_in_file[:remaining])
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
                     if not self.weka_config.skip_invalid_files:
@@ -671,9 +682,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 f = Path(path)
                 if not f.is_file():
                     raise ValueError(f"Trace file does not exist: {path}")
+                if f.suffix.lower() not in {".json", ".jsonl"}:
+                    raise ValueError(f"Trace file must be a .json or .jsonl file: {path}")
                 try:
-                    blob = json.loads(f.read_text(encoding="utf-8"))
-                    raw_traces.append(WekaTrace.model_validate(blob))
+                    raw_traces.extend(self._load_traces_from_local_file(f))
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
                     if not self.weka_config.skip_invalid_files:
@@ -713,6 +725,29 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         return list(unique_traces.values())
 
+    def _load_traces_from_local_file(self, file_path: Path) -> List[WekaTrace]:
+        """Load Weka traces from one local `.json` or `.jsonl` file."""
+        suffix = file_path.suffix.lower()
+        if suffix == ".json":
+            blob = json.loads(file_path.read_text(encoding="utf-8"))
+            return [WekaTrace.model_validate(blob)]
+        if suffix == ".jsonl":
+            traces: List[WekaTrace] = []
+            with file_path.open("r", encoding="utf-8") as file_stream:
+                for line_idx, line in enumerate(file_stream, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        blob = json.loads(line)
+                        traces.append(WekaTrace.model_validate(blob))
+                    except Exception as e:
+                        logger.error(f"Failed to validate row {line_idx} in {file_path.name}: {e}")
+                        if not self.weka_config.skip_invalid_files:
+                            raise
+            return traces
+        raise ValueError(f"Unsupported trace file extension for {file_path}; expected .json or .jsonl")
+
+    # Note : By default session IDs are composed in such a way that repetititon of same session generates a different session ID.
     def _build_sessions_from_traces(self, traces: List[WekaTrace]) -> List[ReplaySession]:
         sessions: List[ReplaySession] = []
 
