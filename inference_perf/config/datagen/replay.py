@@ -289,6 +289,22 @@ class WekaTraceReplayConfig(SessionReplayConfig):
             "parallel materialization. Ignored when compile_parallelism_mode='off'."
         ),
     )
+    compile_inflight_limit: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Maximum number of traces kept in-flight concurrently during process-based "
+            "Weka compile scheduling. When unset, compile_chunk_size is used as a "
+            "backward-compatible fallback."
+        ),
+    )
+    compile_timing_jsonl_path: Optional[str] = Field(
+        None,
+        description=(
+            "Optional path to write compile-stage timing events as JSONL. "
+            "When unset, compile timing events are not persisted."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_trace_sources(self) -> "WekaTraceReplayConfig":

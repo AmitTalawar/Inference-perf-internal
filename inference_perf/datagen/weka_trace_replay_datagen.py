@@ -55,7 +55,7 @@ hashes recorded in the trace.
 """
 
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import hashlib
 import json
 import logging
@@ -64,6 +64,7 @@ import os
 from pathlib import Path
 import random
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Annotated
 from multiprocessing.managers import SyncManager
 
@@ -84,6 +85,7 @@ from inference_perf.datagen.replay_graph_types import ReplayMessage
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 
 logger = logging.getLogger(__name__)
+_PROCESS_TOKENIZER_CACHE: Dict[str, Any] = {}
 
 
 # =============================================================================
@@ -842,13 +844,21 @@ def _build_trace_session_in_process(
     static_model_name: str,
     model_mapping: Optional[Dict[str, str]],
     tokenizer_name_or_path: str,
-) -> Optional[ReplaySession]:
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+) -> Tuple[Optional[ReplaySession], Dict[str, Any]]:
+    t_total_start = time.perf_counter()
+    t_tok_start = time.perf_counter()
+    tokenizer = _PROCESS_TOKENIZER_CACHE.get(tokenizer_name_or_path)
+    tokenizer_cache_hit = tokenizer is not None
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+        _PROCESS_TOKENIZER_CACHE[tokenizer_name_or_path] = tokenizer
+    tokenizer_load_ms = int((time.perf_counter() - t_tok_start) * 1000)
 
     def decode_tokens_to_text(tokens: List[int]) -> str:
         decoded = tokenizer.decode(tokens)
         return decoded if isinstance(decoded, str) else " ".join(decoded)
 
+    t_reconstruct_start = time.perf_counter()
     raw_calls = _reconstruct_raw_calls_shared(
         trace,
         base_seed=base_seed,
@@ -860,16 +870,42 @@ def _build_trace_session_in_process(
         static_model_name=static_model_name,
         model_mapping=model_mapping,
     )
+    reconstruct_raw_calls_ms = int((time.perf_counter() - t_reconstruct_start) * 1000)
     if not raw_calls:
-        return None
+        return None, {
+            "trace_id": trace.id,
+            "trace_index": trace_index,
+            "pid": os.getpid(),
+            "tokenizer_cache_hit": tokenizer_cache_hit,
+            "tokenizer_load_ms": tokenizer_load_ms,
+            "reconstruct_raw_calls_ms": reconstruct_raw_calls_ms,
+            "build_graph_ms": 0,
+            "trace_total_ms": int((time.perf_counter() - t_total_start) * 1000),
+            "raw_call_count": 0,
+            "event_count": 0,
+        }
 
+    t_graph_start = time.perf_counter()
     graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
-    return ReplaySession(
+    build_graph_ms = int((time.perf_counter() - t_graph_start) * 1000)
+    session = ReplaySession(
         session_id=f"wekatrace{trace_index}_{trace.id}",
         source_id=trace.id,
         session_index=trace_index,
         graph=graph,
     )
+    return session, {
+        "trace_id": trace.id,
+        "trace_index": trace_index,
+        "pid": os.getpid(),
+        "tokenizer_cache_hit": tokenizer_cache_hit,
+        "tokenizer_load_ms": tokenizer_load_ms,
+        "reconstruct_raw_calls_ms": reconstruct_raw_calls_ms,
+        "build_graph_ms": build_graph_ms,
+        "trace_total_ms": int((time.perf_counter() - t_total_start) * 1000),
+        "raw_call_count": len(raw_calls),
+        "event_count": len(graph.events),
+    }
 
 
 # =============================================================================
@@ -908,6 +944,24 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         self.mp_manager = mp_manager
         self.num_workers = max(1, num_workers)
         self.base_seed = base_seed if base_seed is not None else 42
+        self._compile_timing_jsonl_path: Optional[Path] = (
+            Path(self.weka_config.compile_timing_jsonl_path)
+            if self.weka_config.compile_timing_jsonl_path
+            else None
+        )
+        if self._compile_timing_jsonl_path is not None:
+            self._compile_timing_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            self._compile_timing_jsonl_path.write_text("", encoding="utf-8")
+            self._emit_compile_timing(
+                "compile_run_start",
+                {
+                    "compile_parallelism_mode": self.weka_config.compile_parallelism_mode,
+                    "compile_workers_configured": self.weka_config.compile_workers,
+                    "compile_chunk_size": self.weka_config.compile_chunk_size,
+                    "compile_inflight_limit": self.weka_config.compile_inflight_limit,
+                    "num_workers_runtime": self.num_workers,
+                },
+            )
 
         # Initialize deterministic prompt corpus
         if self.tokenizer is None:
@@ -921,20 +975,82 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         if not corpus_path.is_file():
             raise FileNotFoundError(f"Prompt corpus file not found: {corpus_path}")
 
+        t_corpus_read_start = time.perf_counter()
         corpus_text = corpus_path.read_text(encoding="utf-8")
+        corpus_read_ms = int((time.perf_counter() - t_corpus_read_start) * 1000)
         logger.info(f"Loaded prompt corpus from: {corpus_path} ({len(corpus_text)} chars)")
 
         base_prompt = "Pick as many lines as you can from these poem lines:\n"
+        t_corpus_tokenize_start = time.perf_counter()
         self._tokenized_corpus = self.tokenizer.get_tokenizer().encode(base_prompt + corpus_text)
+        corpus_tokenize_ms = int((time.perf_counter() - t_corpus_tokenize_start) * 1000)
         self._corpus_size = len(self._tokenized_corpus)
+        self._emit_compile_timing(
+            "corpus_tokenization",
+            {
+                "corpus_path": str(corpus_path),
+                "corpus_char_count": len(corpus_text),
+                "tokenized_corpus_size": self._corpus_size,
+                "corpus_read_ms": corpus_read_ms,
+                "corpus_tokenize_ms": corpus_tokenize_ms,
+            },
+        )
 
         self._hash_id_rng = HashIdRandomGenerator(self.base_seed)
         self._cache: Dict[int, List[int]] = {}
 
         # Load all WekaTrace records
+        t_trace_load_start = time.perf_counter()
         traces = self._load_weka_traces()
+        trace_load_ms = int((time.perf_counter() - t_trace_load_start) * 1000)
+        self._emit_compile_timing(
+            "trace_load",
+            {
+                "trace_count": len(traces),
+                "trace_load_ms": trace_load_ms,
+            },
+        )
+        t_session_build_start = time.perf_counter()
         sessions = self._build_sessions_from_traces(traces)
+        session_build_ms = int((time.perf_counter() - t_session_build_start) * 1000)
+        self._emit_compile_timing(
+            "session_build_complete",
+            {
+                "session_count": len(sessions),
+                "session_build_ms": session_build_ms,
+            },
+        )
+        t_schedule_start = time.perf_counter()
         self.initialize_sessions(sessions)
+        schedule_build_ms = int((time.perf_counter() - t_schedule_start) * 1000)
+        self._emit_compile_timing(
+            "initialize_sessions_complete",
+            {
+                "schedule_event_count": len(self.all_events),
+                "initialize_sessions_ms": schedule_build_ms,
+            },
+        )
+        self._emit_compile_timing("compile_run_end", {})
+
+    def _emit_compile_timing(self, event: str, payload: Dict[str, Any]) -> None:
+        if self._compile_timing_jsonl_path is None:
+            return
+
+        mode = self.weka_config.compile_parallelism_mode
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "mode": mode,
+            "is_parallel": mode == "process",
+            "compile_workers": self.weka_config.compile_workers if mode == "process" else 1,
+            "compile_chunk_size": self.weka_config.compile_chunk_size if mode == "process" else 1,
+            "compile_inflight_limit": self.weka_config.compile_inflight_limit
+            if mode == "process"
+            else None,
+        }
+        record.update(payload)
+        with self._compile_timing_jsonl_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
 
     def _load_weka_traces(self) -> List[WekaTrace]:
         """Loads traces from local files/dirs or a Hugging Face dataset.
@@ -1043,14 +1159,39 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             return self._build_sessions_from_traces_parallel(traces)
 
         sessions: List[ReplaySession] = []
+        self._emit_compile_timing(
+            "session_build_mode",
+            {
+                "effective_mode": "sequential",
+                "trace_count": len(traces),
+            },
+        )
 
         for trace_index, trace in enumerate(traces):
             try:
+                t_trace_start = time.perf_counter()
+                t_reconstruct_start = time.perf_counter()
                 raw_calls = self._reconstruct_raw_calls(trace)
+                reconstruct_raw_calls_ms = int((time.perf_counter() - t_reconstruct_start) * 1000)
                 if not raw_calls:
+                    self._emit_compile_timing(
+                        "trace_compile",
+                        {
+                            "trace_id": trace.id,
+                            "trace_index": trace_index,
+                            "execution_mode": "sequential",
+                            "reconstruct_raw_calls_ms": reconstruct_raw_calls_ms,
+                            "build_graph_ms": 0,
+                            "trace_total_ms": int((time.perf_counter() - t_trace_start) * 1000),
+                            "raw_call_count": 0,
+                            "event_count": 0,
+                        },
+                    )
                     continue
 
+                t_graph_start = time.perf_counter()
                 graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+                build_graph_ms = int((time.perf_counter() - t_graph_start) * 1000)
 
                 # Make session ID unique per trace run
                 session_id = f"wekatrace{trace_index}_{trace.id}"
@@ -1061,6 +1202,19 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                         session_index=trace_index,
                         graph=graph,
                     )
+                )
+                self._emit_compile_timing(
+                    "trace_compile",
+                    {
+                        "trace_id": trace.id,
+                        "trace_index": trace_index,
+                        "execution_mode": "sequential",
+                        "reconstruct_raw_calls_ms": reconstruct_raw_calls_ms,
+                        "build_graph_ms": build_graph_ms,
+                        "trace_total_ms": int((time.perf_counter() - t_trace_start) * 1000),
+                        "raw_call_count": len(raw_calls),
+                        "event_count": len(graph.events),
+                    },
                 )
             except Exception as e:
                 logger.error(f"Failed to process Weka trace {trace.id}: {e}")
@@ -1079,7 +1233,20 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         if compile_workers <= 0:
             compile_workers = os.cpu_count() or 1
         compile_workers = max(1, min(compile_workers, len(traces)))
-        compile_chunk_size = self.weka_config.compile_chunk_size
+        inflight_limit = self.weka_config.compile_inflight_limit
+        if inflight_limit is None:
+            inflight_limit = self.weka_config.compile_chunk_size
+        inflight_limit = max(1, min(inflight_limit, len(traces)))
+        self._emit_compile_timing(
+            "session_build_mode",
+            {
+                "effective_mode": "process",
+                "trace_count": len(traces),
+                "effective_compile_workers": compile_workers,
+                "compile_chunk_size": self.weka_config.compile_chunk_size,
+                "compile_inflight_limit": inflight_limit,
+            },
+        )
 
         tokenizer_instance = self.tokenizer.get_tokenizer()
         tokenizer_name_or_path = getattr(tokenizer_instance, "name_or_path", "")
@@ -1087,12 +1254,37 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             logger.warning(
                 "Weka compile parallelism requested but tokenizer has no name_or_path; falling back to sequential compilation"
             )
+            self._emit_compile_timing(
+                "session_build_mode",
+                {
+                    "effective_mode": "sequential_fallback_no_tokenizer_name",
+                    "trace_count": len(traces),
+                },
+            )
             for trace_index, trace in enumerate(traces):
                 try:
+                    t_trace_start = time.perf_counter()
+                    t_reconstruct_start = time.perf_counter()
                     raw_calls = self._reconstruct_raw_calls(trace)
+                    reconstruct_raw_calls_ms = int((time.perf_counter() - t_reconstruct_start) * 1000)
                     if not raw_calls:
+                        self._emit_compile_timing(
+                            "trace_compile",
+                            {
+                                "trace_id": trace.id,
+                                "trace_index": trace_index,
+                                "execution_mode": "sequential_fallback_no_tokenizer_name",
+                                "reconstruct_raw_calls_ms": reconstruct_raw_calls_ms,
+                                "build_graph_ms": 0,
+                                "trace_total_ms": int((time.perf_counter() - t_trace_start) * 1000),
+                                "raw_call_count": 0,
+                                "event_count": 0,
+                            },
+                        )
                         continue
+                    t_graph_start = time.perf_counter()
                     graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+                    build_graph_ms = int((time.perf_counter() - t_graph_start) * 1000)
                     sessions.append(
                         ReplaySession(
                             session_id=f"wekatrace{trace_index}_{trace.id}",
@@ -1100,6 +1292,19 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                             session_index=trace_index,
                             graph=graph,
                         )
+                    )
+                    self._emit_compile_timing(
+                        "trace_compile",
+                        {
+                            "trace_id": trace.id,
+                            "trace_index": trace_index,
+                            "execution_mode": "sequential_fallback_no_tokenizer_name",
+                            "reconstruct_raw_calls_ms": reconstruct_raw_calls_ms,
+                            "build_graph_ms": build_graph_ms,
+                            "trace_total_ms": int((time.perf_counter() - t_trace_start) * 1000),
+                            "raw_call_count": len(raw_calls),
+                            "event_count": len(graph.events),
+                        },
                     )
                 except Exception as e:
                     logger.error(f"Failed to process Weka trace {trace.id}: {e}")
@@ -1110,42 +1315,75 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             return sessions
 
         logger.info(
-            "Weka compile parallelism enabled: mode=process workers=%d chunk_size=%d traces=%d",
+            "Weka compile parallelism enabled: mode=process workers=%d inflight_limit=%d traces=%d",
             compile_workers,
-            compile_chunk_size,
+            inflight_limit,
             len(traces),
         )
         t0 = time.perf_counter()
+        session_by_trace_index: Dict[int, ReplaySession] = {}
         with ProcessPoolExecutor(max_workers=compile_workers) as executor:
-            for batch_start in range(0, len(traces), compile_chunk_size):
-                batch = traces[batch_start : batch_start + compile_chunk_size]
-                futures = [
-                    executor.submit(
-                        _build_trace_session_in_process,
-                        trace_index,
-                        trace,
-                        base_seed=self.base_seed,
-                        tokenized_corpus=self._tokenized_corpus,
-                        default_block_size=self.weka_config.default_block_size,
-                        trace_idle_gap_cap_seconds=self.weka_config.trace_idle_gap_cap_seconds,
-                        use_static_model=self.weka_config.use_static_model,
-                        static_model_name=self.weka_config.static_model_name,
-                        model_mapping=self.weka_config.model_mapping,
-                        tokenizer_name_or_path=tokenizer_name_or_path,
-                    )
-                    for trace_index, trace in enumerate(batch, start=batch_start)
-                ]
+            traces_with_indices = list(enumerate(traces))
+            next_submit_idx = 0
+            in_flight: Dict[Any, Tuple[int, WekaTrace, float]] = {}
 
-                for future, trace in zip(futures, batch):
+            def submit_one(trace_index: int, trace: WekaTrace) -> None:
+                fut = executor.submit(
+                    _build_trace_session_in_process,
+                    trace_index,
+                    trace,
+                    base_seed=self.base_seed,
+                    tokenized_corpus=self._tokenized_corpus,
+                    default_block_size=self.weka_config.default_block_size,
+                    trace_idle_gap_cap_seconds=self.weka_config.trace_idle_gap_cap_seconds,
+                    use_static_model=self.weka_config.use_static_model,
+                    static_model_name=self.weka_config.static_model_name,
+                    model_mapping=self.weka_config.model_mapping,
+                    tokenizer_name_or_path=tokenizer_name_or_path,
+                )
+                in_flight[fut] = (trace_index, trace, time.perf_counter())
+
+            initial_submit = min(inflight_limit, len(traces_with_indices))
+            for _ in range(initial_submit):
+                trace_index, trace = traces_with_indices[next_submit_idx]
+                submit_one(trace_index, trace)
+                next_submit_idx += 1
+
+            while in_flight:
+                done, _ = wait(list(in_flight.keys()), return_when=FIRST_COMPLETED)
+                for future in done:
+                    trace_index, trace, submit_time = in_flight.pop(future)
                     try:
-                        session = future.result()
+                        session, trace_timing = future.result()
                         if session is not None:
-                            sessions.append(session)
+                            session_by_trace_index[trace_index] = session
+                        trace_timing["execution_mode"] = "process"
+                        trace_timing["scheduler_queue_wait_ms"] = int((time.perf_counter() - submit_time) * 1000)
+                        self._emit_compile_timing("trace_compile", trace_timing)
                     except Exception as e:
                         logger.error(f"Failed to process Weka trace {trace.id} in parallel: {e}")
                         failed_trace_ids.append(trace.id)
                         if not self.weka_config.skip_invalid_files:
                             raise
+
+                    if next_submit_idx < len(traces_with_indices):
+                        next_trace_index, next_trace = traces_with_indices[next_submit_idx]
+                        submit_one(next_trace_index, next_trace)
+                        next_submit_idx += 1
+
+                self._emit_compile_timing(
+                    "compile_batch",
+                    {
+                        "batch_start_index": 0,
+                        "batch_size": len(in_flight),
+                        "batch_elapsed_ms": 0,
+                        "scheduler_event": "inflight_refill",
+                        "submitted_so_far": next_submit_idx,
+                    },
+                )
+
+        for trace_index in sorted(session_by_trace_index.keys()):
+            sessions.append(session_by_trace_index[trace_index])
 
         random.seed(self.base_seed)
         random.shuffle(sessions)
