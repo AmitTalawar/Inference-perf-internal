@@ -64,3 +64,9 @@ def setup_logging(level: str) -> None:
         handlers=[handler],
         force=True,
     )
+
+    # Keep noisy third-party HTTP logs out of normal INFO runs.
+    # They remain available when running with DEBUG log level.
+    third_party_http_level = logging.DEBUG if numeric_level == logging.DEBUG else logging.WARNING
+    for logger_name in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
+        logging.getLogger(logger_name).setLevel(third_party_http_level)

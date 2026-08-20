@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import Field, model_validator
 
@@ -265,6 +265,30 @@ class WekaTraceReplayConfig(SessionReplayConfig):
     use_think_time_only: bool = Field(False, description="Only use think_time attribute instead of timestamps")
     default_block_size: int = Field(64, description="Default block size if not specified in trace")
     num_dataset_entries: int = Field(100, description="Max number of dataset traces to load from HuggingFace")
+    compile_parallelism_mode: Literal["off", "process"] = Field(
+        "off",
+        description=(
+            "Weka compile-time parallelism mode. "
+            "'off' keeps sequential trace materialization; "
+            "'process' materializes traces in parallel worker processes."
+        ),
+    )
+    compile_workers: int = Field(
+        1,
+        ge=1,
+        description=(
+            "Number of worker processes for compile_parallelism_mode='process'. "
+            "Ignored when compile_parallelism_mode='off'."
+        ),
+    )
+    compile_chunk_size: int = Field(
+        1,
+        ge=1,
+        description=(
+            "Chunk size for process-pool map scheduling during Weka compile-time "
+            "parallel materialization. Ignored when compile_parallelism_mode='off'."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_trace_sources(self) -> "WekaTraceReplayConfig":

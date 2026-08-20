@@ -55,17 +55,21 @@ hashes recorded in the trace.
 """
 
 from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
 import logging
 import math
+import os
 from pathlib import Path
 import random
+import time
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Annotated
 from multiprocessing.managers import SyncManager
 
 from huggingface_hub import hf_hub_download
 from pydantic import BaseModel, Field
+from transformers import AutoTokenizer
 
 from inference_perf.config import APIConfig, DataConfig
 from inference_perf.datagen.replay_graph_session_datagen import (
@@ -582,6 +586,292 @@ def _build_trace_idle_timing(
     )
 
 
+def _reconstruct_raw_calls_shared(
+    trace: WekaTrace,
+    *,
+    base_seed: int,
+    tokenized_corpus: List[int],
+    default_block_size: int,
+    trace_idle_gap_cap_seconds: float,
+    decode_tokens_to_text: Any,
+    use_static_model: bool,
+    static_model_name: str,
+    model_mapping: Optional[Dict[str, str]],
+) -> List[RawCall]:
+    cache: Dict[int, List[int]] = {}
+    hash_id_rng = HashIdRandomGenerator(base_seed)
+    hash_id_rng.set_trace_id(trace.id)
+    corpus_size = len(tokenized_corpus)
+
+    configured = model_mapping or {}
+    model_map = {m: static_model_name for m in trace.models} if use_static_model else configured
+
+    normals: List[Tuple[int, Union[WekaNormalRequest, WekaStreamingRequest]]] = []
+    subagents: List[Tuple[int, WekaSubagentEntry]] = []
+    for idx, req in enumerate(trace.requests):
+        if isinstance(req, WekaNormalRequest | WekaStreamingRequest):
+            normals.append((idx, req))
+        elif isinstance(req, WekaSubagentEntry):
+            subagents.append((idx, req))
+
+    trace_bs = trace.block_size if hasattr(trace, "block_size") and trace.block_size else default_block_size
+    parent_plan = _ParentPlan(trace.id, normals, subagents, block_size=trace_bs)
+
+    child_plans: List[_ChildPlan] = []
+    for sa_index, (_, entry) in enumerate(subagents):
+        streams = _pack_into_streams(list(entry.requests))
+        if not streams:
+            streams = [[]]
+        multi = len(streams) > 1
+        for stream_idx, stream_reqs in enumerate(streams):
+            child_sid = f"{trace.id}::sa:{entry.agent_id}"
+            if multi:
+                child_sid += f":s{stream_idx}"
+            child_plans.append(
+                _ChildPlan(
+                    session_id=child_sid,
+                    parent_trace_id=trace.id,
+                    subagent_index=sa_index,
+                    entry=entry,
+                    stream_index=stream_idx,
+                    stream_requests=stream_reqs,
+                    block_size=trace_bs,
+                )
+            )
+
+    timing = _build_trace_idle_timing(parent_plan, child_plans, trace_idle_gap_cap_seconds)
+
+    def decode_block_tokens(hash_ids: List[int]) -> List[int]:
+        tokens: List[int] = []
+        for h in hash_ids:
+            cached = cache.get(h)
+            if cached is None:
+                hash_id_rng.reseed_for_hash_id(h)
+                start = hash_id_rng.randrange(corpus_size)
+                end = start + trace_bs
+                cached = tokenized_corpus[start:end]
+                if end > corpus_size:
+                    cached = cached + tokenized_corpus[: end - corpus_size]
+                cache[h] = cached
+            tokens.extend(cached)
+        return tokens
+
+    def sample_partial_tail_tokens(n: int, seed: str) -> List[int]:
+        if n <= 0:
+            return []
+        digest = hashlib.sha256(seed.encode()).digest()
+        offset = int.from_bytes(digest[:8], "big") % max(corpus_size - n, 1)
+        return list(tokenized_corpus[offset : offset + n])
+
+    parent_recon = ConversationReconstructor(
+        block_size=trace_bs,
+        decode_block_tokens=decode_block_tokens,
+        sample_partial_tail_tokens=sample_partial_tail_tokens,
+        decode_tokens_to_text=decode_tokens_to_text,
+    )
+    parent_calls: List[RawCall] = []
+    for k, (outer_idx, req) in enumerate(parent_plan.normals):
+        seed = f"{trace.id}:turn_{k}:partial_tail"
+        if k == 0:
+            parent_recon.init_turn_0(
+                hash_ids=req.hash_ids,
+                in_tokens=req.input_length,
+                tool_tokens=trace.tool_tokens,
+                system_tokens=trace.system_tokens,
+                seed=seed,
+            )
+        else:
+            prev_req = parent_plan.normals[k - 1][1]
+            parent_recon.advance_turn(
+                prev_hash_ids=prev_req.hash_ids,
+                prev_in_tokens=prev_req.input_length,
+                prev_out_tokens=prev_req.output_length,
+                curr_hash_ids=req.hash_ids,
+                curr_in_tokens=req.input_length,
+                seed=seed,
+            )
+
+        messages_dicts = parent_recon.snapshot_messages()
+        messages = [ReplayMessage(role=m["role"], text=m["content"]) for m in messages_dicts]
+
+        t_timing = timing.parent_by_outer_idx[outer_idx]
+        t_start_ms = int(t_timing.timestamp_seconds * 1000.0)
+        t_end_ms = t_start_ms + int((req.api_time or 0.0) * 1000.0)
+
+        expected_out_text = ""
+        if k + 1 < len(parent_plan.normals):
+            lookahead = ConversationReconstructor(
+                block_size=trace_bs,
+                decode_block_tokens=decode_block_tokens,
+                sample_partial_tail_tokens=sample_partial_tail_tokens,
+                decode_tokens_to_text=decode_tokens_to_text,
+            )
+            lookahead._segments = [
+                RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content) for s in parent_recon._segments
+            ]
+            next_req = parent_plan.normals[k + 1][1]
+            next_seed = f"{trace.id}:turn_{k + 1}:partial_tail"
+            lookahead.advance_turn(
+                prev_hash_ids=req.hash_ids,
+                prev_in_tokens=req.input_length,
+                prev_out_tokens=req.output_length,
+                curr_hash_ids=next_req.hash_ids,
+                curr_in_tokens=next_req.input_length,
+                seed=next_seed,
+            )
+            for seg in reversed(lookahead._segments):
+                if seg.role == "assistant":
+                    expected_out_text = seg.content
+                    break
+        else:
+            out_tokens = sample_partial_tail_tokens(req.output_length, f"{trace.id}:final_parent_turn_completion")
+            expected_out_text = decode_tokens_to_text(out_tokens)
+
+        parent_calls.append(
+            RawCall(
+                call_id=f"parent_turn_{k}",
+                trace_id=trace.id,
+                t_start_ms=t_start_ms,
+                t_end_ms=t_end_ms,
+                model=model_map.get(req.model, req.model),
+                messages=messages,
+                out_message=ReplayMessage(role="assistant", text=expected_out_text),
+                prompt_tokens=req.input_length,
+                completion_tokens=req.output_length,
+                temperature=0.0,
+                max_tokens_recorded=req.output_length,
+            )
+        )
+
+    child_calls: List[RawCall] = []
+    for cp in child_plans:
+        child_recon = ConversationReconstructor(
+            block_size=trace_bs,
+            decode_block_tokens=decode_block_tokens,
+            sample_partial_tail_tokens=sample_partial_tail_tokens,
+            decode_tokens_to_text=decode_tokens_to_text,
+        )
+        for k, creq in enumerate(cp.stream_requests):
+            seed = f"{cp.session_id}:turn_{k}:partial_tail"
+            if k == 0:
+                child_recon.init_turn_0(
+                    hash_ids=creq.hash_ids,
+                    in_tokens=creq.input_length,
+                    tool_tokens=cp.entry.tool_tokens,
+                    system_tokens=cp.entry.system_tokens,
+                    seed=seed,
+                )
+            else:
+                prev_creq = cp.stream_requests[k - 1]
+                child_recon.advance_turn(
+                    prev_hash_ids=prev_creq.hash_ids,
+                    prev_in_tokens=prev_creq.input_length,
+                    prev_out_tokens=prev_creq.output_length,
+                    curr_hash_ids=creq.hash_ids,
+                    curr_in_tokens=creq.input_length,
+                    seed=seed,
+                )
+
+            messages_dicts = child_recon.snapshot_messages()
+            messages = [ReplayMessage(role=m["role"], text=m["content"]) for m in messages_dicts]
+
+            t_timing = timing.child_by_session_request[(cp.session_id, k)]
+            t_start_ms = int(t_timing.timestamp_seconds * 1000.0)
+            t_end_ms = t_start_ms + int((creq.api_time or 0.0) * 1000.0)
+
+            expected_out_text = ""
+            if k + 1 < len(cp.stream_requests):
+                lookahead = ConversationReconstructor(
+                    block_size=trace_bs,
+                    decode_block_tokens=decode_block_tokens,
+                    sample_partial_tail_tokens=sample_partial_tail_tokens,
+                    decode_tokens_to_text=decode_tokens_to_text,
+                )
+                lookahead._segments = [
+                    RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content)
+                    for s in child_recon._segments
+                ]
+                next_creq = cp.stream_requests[k + 1]
+                next_seed = f"{cp.session_id}:turn_{k + 1}:partial_tail"
+                lookahead.advance_turn(
+                    prev_hash_ids=creq.hash_ids,
+                    prev_in_tokens=creq.input_length,
+                    prev_out_tokens=creq.output_length,
+                    curr_hash_ids=next_creq.hash_ids,
+                    curr_in_tokens=next_creq.input_length,
+                    seed=next_seed,
+                )
+                for seg in reversed(lookahead._segments):
+                    if seg.role == "assistant":
+                        expected_out_text = seg.content
+                        break
+            else:
+                out_tokens = sample_partial_tail_tokens(creq.output_length, f"{cp.session_id}:final_turn_completion")
+                expected_out_text = decode_tokens_to_text(out_tokens)
+
+            child_calls.append(
+                RawCall(
+                    call_id=f"sa_{cp.entry.agent_id}_s{cp.stream_index}_turn_{k}",
+                    trace_id=trace.id,
+                    t_start_ms=t_start_ms,
+                    t_end_ms=t_end_ms,
+                    model=model_map.get(creq.model, creq.model),
+                    messages=messages,
+                    out_message=ReplayMessage(role="assistant", text=expected_out_text),
+                    prompt_tokens=creq.input_length,
+                    completion_tokens=creq.output_length,
+                    temperature=0.0,
+                    max_tokens_recorded=creq.output_length,
+                )
+            )
+
+    all_calls = parent_calls + child_calls
+    all_calls.sort(key=lambda c: (c.t_start_ms, c.call_id))
+    return all_calls
+
+
+def _build_trace_session_in_process(
+    trace_index: int,
+    trace: WekaTrace,
+    *,
+    base_seed: int,
+    tokenized_corpus: List[int],
+    default_block_size: int,
+    trace_idle_gap_cap_seconds: float,
+    use_static_model: bool,
+    static_model_name: str,
+    model_mapping: Optional[Dict[str, str]],
+    tokenizer_name_or_path: str,
+) -> Optional[ReplaySession]:
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+
+    def decode_tokens_to_text(tokens: List[int]) -> str:
+        decoded = tokenizer.decode(tokens)
+        return decoded if isinstance(decoded, str) else " ".join(decoded)
+
+    raw_calls = _reconstruct_raw_calls_shared(
+        trace,
+        base_seed=base_seed,
+        tokenized_corpus=tokenized_corpus,
+        default_block_size=default_block_size,
+        trace_idle_gap_cap_seconds=trace_idle_gap_cap_seconds,
+        decode_tokens_to_text=decode_tokens_to_text,
+        use_static_model=use_static_model,
+        static_model_name=static_model_name,
+        model_mapping=model_mapping,
+    )
+    if not raw_calls:
+        return None
+
+    graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+    return ReplaySession(
+        session_id=f"wekatrace{trace_index}_{trace.id}",
+        source_id=trace.id,
+        session_index=trace_index,
+        graph=graph,
+    )
+
+
 # =============================================================================
 # WekaTraceReplayDataGenerator Class
 # =============================================================================
@@ -749,6 +1039,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
     # Note : By default session IDs are composed in such a way that repetititon of same session generates a different session ID.
     def _build_sessions_from_traces(self, traces: List[WekaTrace]) -> List[ReplaySession]:
+        if self.weka_config.compile_parallelism_mode == "process" and len(traces) > 1:
+            return self._build_sessions_from_traces_parallel(traces)
+
         sessions: List[ReplaySession] = []
 
         for trace_index, trace in enumerate(traces):
@@ -779,266 +1072,111 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         random.shuffle(sessions)
         return sessions
 
-    def _reconstruct_raw_calls(self, trace: WekaTrace) -> List[RawCall]:
-        # Reset local cache for deterministic scope
-        self._cache.clear()
-        self._hash_id_rng.set_trace_id(trace.id)
+    def _build_sessions_from_traces_parallel(self, traces: List[WekaTrace]) -> List[ReplaySession]:
+        sessions: List[ReplaySession] = []
+        failed_trace_ids: List[str] = []
+        compile_workers = self.weka_config.compile_workers
+        if compile_workers <= 0:
+            compile_workers = os.cpu_count() or 1
+        compile_workers = max(1, min(compile_workers, len(traces)))
+        compile_chunk_size = self.weka_config.compile_chunk_size
 
-        # Build model mappings
-        model_map = self._build_model_map(trace)
-
-        # Build Plans
-        normals: List[Tuple[int, Union[WekaNormalRequest, WekaStreamingRequest]]] = []
-        subagents: List[Tuple[int, WekaSubagentEntry]] = []
-        for idx, req in enumerate(trace.requests):
-            if isinstance(req, WekaNormalRequest | WekaStreamingRequest):
-                normals.append((idx, req))
-            elif isinstance(req, WekaSubagentEntry):
-                subagents.append((idx, req))
-
-        trace_bs = self.weka_config.default_block_size
-        if hasattr(trace, "block_size") and trace.block_size:
-            trace_bs = trace.block_size
-
-        parent_plan = _ParentPlan(trace.id, normals, subagents, block_size=trace_bs)
-
-        child_plans: List[_ChildPlan] = []
-        for sa_index, (_, entry) in enumerate(subagents):
-            streams = _pack_into_streams(list(entry.requests))
-            if not streams:
-                streams = [[]]
-            multi = len(streams) > 1
-            for stream_idx, stream_reqs in enumerate(streams):
-                child_sid = f"{trace.id}::sa:{entry.agent_id}"
-                if multi:
-                    child_sid += f":s{stream_idx}"
-                child_plans.append(
-                    _ChildPlan(
-                        session_id=child_sid,
-                        parent_trace_id=trace.id,
-                        subagent_index=sa_index,
-                        entry=entry,
-                        stream_index=stream_idx,
-                        stream_requests=stream_reqs,
-                        block_size=trace_bs,
+        tokenizer_instance = self.tokenizer.get_tokenizer()
+        tokenizer_name_or_path = getattr(tokenizer_instance, "name_or_path", "")
+        if not tokenizer_name_or_path:
+            logger.warning(
+                "Weka compile parallelism requested but tokenizer has no name_or_path; falling back to sequential compilation"
+            )
+            for trace_index, trace in enumerate(traces):
+                try:
+                    raw_calls = self._reconstruct_raw_calls(trace)
+                    if not raw_calls:
+                        continue
+                    graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+                    sessions.append(
+                        ReplaySession(
+                            session_id=f"wekatrace{trace_index}_{trace.id}",
+                            source_id=trace.id,
+                            session_index=trace_index,
+                            graph=graph,
+                        )
                     )
-                )
+                except Exception as e:
+                    logger.error(f"Failed to process Weka trace {trace.id}: {e}")
+                    if not self.weka_config.skip_invalid_files:
+                        raise
+            random.seed(self.base_seed)
+            random.shuffle(sessions)
+            return sessions
 
-        # Time warping
-        timing = _build_trace_idle_timing(parent_plan, child_plans, self.weka_config.trace_idle_gap_cap_seconds)
+        logger.info(
+            "Weka compile parallelism enabled: mode=process workers=%d chunk_size=%d traces=%d",
+            compile_workers,
+            compile_chunk_size,
+            len(traces),
+        )
+        t0 = time.perf_counter()
+        with ProcessPoolExecutor(max_workers=compile_workers) as executor:
+            for batch_start in range(0, len(traces), compile_chunk_size):
+                batch = traces[batch_start : batch_start + compile_chunk_size]
+                futures = [
+                    executor.submit(
+                        _build_trace_session_in_process,
+                        trace_index,
+                        trace,
+                        base_seed=self.base_seed,
+                        tokenized_corpus=self._tokenized_corpus,
+                        default_block_size=self.weka_config.default_block_size,
+                        trace_idle_gap_cap_seconds=self.weka_config.trace_idle_gap_cap_seconds,
+                        use_static_model=self.weka_config.use_static_model,
+                        static_model_name=self.weka_config.static_model_name,
+                        model_mapping=self.weka_config.model_mapping,
+                        tokenizer_name_or_path=tokenizer_name_or_path,
+                    )
+                    for trace_index, trace in enumerate(batch, start=batch_start)
+                ]
 
-        # Call reconstruction helper closures
-        def decode_block_tokens(hash_ids: List[int]) -> List[int]:
-            tokens: List[int] = []
-            for h in hash_ids:
-                cached = self._cache.get(h)
-                if cached is None:
-                    self._hash_id_rng.reseed_for_hash_id(h)
-                    start = self._hash_id_rng.randrange(self._corpus_size)
-                    end = start + trace_bs
-                    cached = self._tokenized_corpus[start:end]
-                    if end > self._corpus_size:
-                        cached = cached + self._tokenized_corpus[: end - self._corpus_size]
-                    self._cache[h] = cached
-                tokens.extend(cached)
-            return tokens
+                for future, trace in zip(futures, batch):
+                    try:
+                        session = future.result()
+                        if session is not None:
+                            sessions.append(session)
+                    except Exception as e:
+                        logger.error(f"Failed to process Weka trace {trace.id} in parallel: {e}")
+                        failed_trace_ids.append(trace.id)
+                        if not self.weka_config.skip_invalid_files:
+                            raise
 
-        def sample_partial_tail_tokens(n: int, seed: str) -> List[int]:
-            if n <= 0:
-                return []
-            digest = hashlib.sha256(seed.encode()).digest()
-            offset = int.from_bytes(digest[:8], "big") % max(self._corpus_size - n, 1)
-            return list(self._tokenized_corpus[offset : offset + n])
+        random.seed(self.base_seed)
+        random.shuffle(sessions)
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            "Weka parallel compile completed in %d ms (sessions=%d failed=%d)",
+            elapsed_ms,
+            len(sessions),
+            len(failed_trace_ids),
+        )
+        return sessions
 
+    def _reconstruct_raw_calls(self, trace: WekaTrace) -> List[RawCall]:
         assert self.tokenizer is not None
-        tokenizer_instance = self.tokenizer
+        tokenizer_instance = self.tokenizer.get_tokenizer()
 
         def decode_tokens_to_text(tokens: List[int]) -> str:
-            decoded = tokenizer_instance.get_tokenizer().decode(tokens)
+            decoded = tokenizer_instance.decode(tokens)
             return decoded if isinstance(decoded, str) else " ".join(decoded)
 
-        # Reconstruct Parent Calls
-        parent_recon = ConversationReconstructor(
-            block_size=trace_bs,
-            decode_block_tokens=decode_block_tokens,
-            sample_partial_tail_tokens=sample_partial_tail_tokens,
+        return _reconstruct_raw_calls_shared(
+            trace,
+            base_seed=self.base_seed,
+            tokenized_corpus=self._tokenized_corpus,
+            default_block_size=self.weka_config.default_block_size,
+            trace_idle_gap_cap_seconds=self.weka_config.trace_idle_gap_cap_seconds,
             decode_tokens_to_text=decode_tokens_to_text,
+            use_static_model=self.weka_config.use_static_model,
+            static_model_name=self.weka_config.static_model_name,
+            model_mapping=self.weka_config.model_mapping,
         )
-
-        parent_calls: List[RawCall] = []
-        for k, (outer_idx, req) in enumerate(parent_plan.normals):
-            seed = f"{trace.id}:turn_{k}:partial_tail"
-            if k == 0:
-                parent_recon.init_turn_0(
-                    hash_ids=req.hash_ids,
-                    in_tokens=req.input_length,
-                    tool_tokens=trace.tool_tokens,
-                    system_tokens=trace.system_tokens,
-                    seed=seed,
-                )
-            else:
-                prev_req = parent_plan.normals[k - 1][1]
-                parent_recon.advance_turn(
-                    prev_hash_ids=prev_req.hash_ids,
-                    prev_in_tokens=prev_req.input_length,
-                    prev_out_tokens=prev_req.output_length,
-                    curr_hash_ids=req.hash_ids,
-                    curr_in_tokens=req.input_length,
-                    seed=seed,
-                )
-
-            # Retrieve text messages for the prompt
-            messages_dicts = parent_recon.snapshot_messages()
-            messages = [ReplayMessage(role=m["role"], text=m["content"]) for m in messages_dicts]
-
-            # Reconstruct timing
-            t_timing = timing.parent_by_outer_idx[outer_idx]
-            t_start_ms = int(t_timing.timestamp_seconds * 1000.0)
-            t_end_ms = t_start_ms + int((req.api_time or 0.0) * 1000.0)
-
-            # Completion is generated at next turn or placeholder if last turn
-            expected_out_text = ""
-            if k + 1 < len(parent_plan.normals):
-                # Run lookahead advance to see what assistant message is generated
-                lookahead = ConversationReconstructor(
-                    block_size=trace_bs,
-                    decode_block_tokens=decode_block_tokens,
-                    sample_partial_tail_tokens=sample_partial_tail_tokens,
-                    decode_tokens_to_text=decode_tokens_to_text,
-                )
-                lookahead._segments = [
-                    RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content)
-                    for s in parent_recon._segments
-                ]
-                next_req = parent_plan.normals[k + 1][1]
-                next_seed = f"{trace.id}:turn_{k + 1}:partial_tail"
-                lookahead.advance_turn(
-                    prev_hash_ids=req.hash_ids,
-                    prev_in_tokens=req.input_length,
-                    prev_out_tokens=req.output_length,
-                    curr_hash_ids=next_req.hash_ids,
-                    curr_in_tokens=next_req.input_length,
-                    seed=next_seed,
-                )
-                # Find the assistant segment added
-                for seg in reversed(lookahead._segments):
-                    if seg.role == "assistant":
-                        expected_out_text = seg.content
-                        break
-            else:
-                # Last turn fallback: sample random tokens from corpus
-                out_tokens = sample_partial_tail_tokens(req.output_length, f"{trace.id}:final_parent_turn_completion")
-                expected_out_text = decode_tokens_to_text(out_tokens)
-
-            out_msg = ReplayMessage(role="assistant", text=expected_out_text)
-
-            parent_calls.append(
-                RawCall(
-                    call_id=f"parent_turn_{k}",
-                    trace_id=trace.id,
-                    t_start_ms=t_start_ms,
-                    t_end_ms=t_end_ms,
-                    model=model_map.get(req.model, req.model),
-                    messages=messages,
-                    out_message=out_msg,
-                    prompt_tokens=req.input_length,
-                    completion_tokens=req.output_length,
-                    temperature=0.0,
-                    max_tokens_recorded=req.output_length,
-                )
-            )
-
-        # Reconstruct Subagent Calls
-        child_calls: List[RawCall] = []
-        for cp in child_plans:
-            child_recon = ConversationReconstructor(
-                block_size=trace_bs,
-                decode_block_tokens=decode_block_tokens,
-                sample_partial_tail_tokens=sample_partial_tail_tokens,
-                decode_tokens_to_text=decode_tokens_to_text,
-            )
-
-            for k, creq in enumerate(cp.stream_requests):
-                seed = f"{cp.session_id}:turn_{k}:partial_tail"
-                if k == 0:
-                    child_recon.init_turn_0(
-                        hash_ids=creq.hash_ids,
-                        in_tokens=creq.input_length,
-                        tool_tokens=cp.entry.tool_tokens,
-                        system_tokens=cp.entry.system_tokens,
-                        seed=seed,
-                    )
-                else:
-                    prev_creq = cp.stream_requests[k - 1]
-                    child_recon.advance_turn(
-                        prev_hash_ids=prev_creq.hash_ids,
-                        prev_in_tokens=prev_creq.input_length,
-                        prev_out_tokens=prev_creq.output_length,
-                        curr_hash_ids=creq.hash_ids,
-                        curr_in_tokens=creq.input_length,
-                        seed=seed,
-                    )
-
-                messages_dicts = child_recon.snapshot_messages()
-                messages = [ReplayMessage(role=m["role"], text=m["content"]) for m in messages_dicts]
-
-                t_timing = timing.child_by_session_request[(cp.session_id, k)]
-                t_start_ms = int(t_timing.timestamp_seconds * 1000.0)
-                t_end_ms = t_start_ms + int((creq.api_time or 0.0) * 1000.0)
-
-                expected_out_text = ""
-                if k + 1 < len(cp.stream_requests):
-                    lookahead = ConversationReconstructor(
-                        block_size=trace_bs,
-                        decode_block_tokens=decode_block_tokens,
-                        sample_partial_tail_tokens=sample_partial_tail_tokens,
-                        decode_tokens_to_text=decode_tokens_to_text,
-                    )
-                    lookahead._segments = [
-                        RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content)
-                        for s in child_recon._segments
-                    ]
-                    next_creq = cp.stream_requests[k + 1]
-                    next_seed = f"{cp.session_id}:turn_{k + 1}:partial_tail"
-                    lookahead.advance_turn(
-                        prev_hash_ids=creq.hash_ids,
-                        prev_in_tokens=creq.input_length,
-                        prev_out_tokens=creq.output_length,
-                        curr_hash_ids=next_creq.hash_ids,
-                        curr_in_tokens=next_creq.input_length,
-                        seed=next_seed,
-                    )
-                    for seg in reversed(lookahead._segments):
-                        if seg.role == "assistant":
-                            expected_out_text = seg.content
-                            break
-                else:
-                    out_tokens = sample_partial_tail_tokens(creq.output_length, f"{cp.session_id}:final_turn_completion")
-                    expected_out_text = decode_tokens_to_text(out_tokens)
-
-                out_msg = ReplayMessage(role="assistant", text=expected_out_text)
-
-                child_calls.append(
-                    RawCall(
-                        # Call ID must match what build_graph uses, ensuring subagent uniqueness
-                        call_id=f"sa_{cp.entry.agent_id}_s{cp.stream_index}_turn_{k}",
-                        trace_id=trace.id,
-                        t_start_ms=t_start_ms,
-                        t_end_ms=t_end_ms,
-                        model=model_map.get(creq.model, creq.model),
-                        messages=messages,
-                        out_message=out_msg,
-                        prompt_tokens=creq.input_length,
-                        completion_tokens=creq.output_length,
-                        temperature=0.0,
-                        max_tokens_recorded=creq.output_length,
-                    )
-                )
-
-        # Combine all parent and child calls, then sort chronologically
-        all_calls = parent_calls + child_calls
-        all_calls.sort(key=lambda c: (c.t_start_ms, c.call_id))
-        return all_calls
 
     def _build_model_map(self, trace: WekaTrace) -> Dict[str, str]:
         """Maps trace-side models to configured api_config or target models."""
