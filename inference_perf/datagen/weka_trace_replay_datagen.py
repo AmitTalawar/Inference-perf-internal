@@ -65,7 +65,7 @@ from pathlib import Path
 import random
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Annotated
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Annotated, Set
 from multiprocessing.managers import SyncManager
 
 from huggingface_hub import hf_hub_download
@@ -136,6 +136,7 @@ class WekaTrace(BaseModel):
     block_size: int
     tool_tokens: int = 0
     system_tokens: int = 0
+    session_headers: Optional[Dict[str, str]] = None
     requests: List[WekaRequest]
 
 
@@ -944,6 +945,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         self.mp_manager = mp_manager
         self.num_workers = max(1, num_workers)
         self.base_seed = base_seed if base_seed is not None else 42
+        self._trace_headers_by_source_id: Dict[str, Dict[str, str]] = {}
+        self._session_headers_by_session_id: Dict[str, Dict[str, str]] = {}
+        self._logged_header_sessions: Set[str] = set()
         self._compile_timing_jsonl_path: Optional[Path] = (
             Path(self.weka_config.compile_timing_jsonl_path)
             if self.weka_config.compile_timing_jsonl_path
@@ -1010,6 +1014,11 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 "trace_load_ms": trace_load_ms,
             },
         )
+        self._trace_headers_by_source_id = {
+            t.id: dict(t.session_headers)
+            for t in traces
+            if t.session_headers
+        }
         t_session_build_start = time.perf_counter()
         sessions = self._build_sessions_from_traces(traces)
         session_build_ms = int((time.perf_counter() - t_session_build_start) * 1000)
@@ -1022,6 +1031,16 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         )
         t_schedule_start = time.perf_counter()
         self.initialize_sessions(sessions)
+        self._session_headers_by_session_id = {
+            session.session_id: dict(self._trace_headers_by_source_id[session.source_id])
+            for session in self.sessions
+            if session is not None and session.source_id in self._trace_headers_by_source_id
+        }
+        if self._session_headers_by_session_id:
+            logger.info(
+                "Weka replay session headers enabled for %d session(s)",
+                len(self._session_headers_by_session_id),
+            )
         schedule_build_ms = int((time.perf_counter() - t_schedule_start) * 1000)
         self._emit_compile_timing(
             "initialize_sessions_complete",
@@ -1116,6 +1135,15 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         - `.jsonl`: one Weka trace object per line
         """
         raw_traces: List[WekaTrace] = []
+        max_entries = self.weka_config.num_dataset_entries
+
+        def _append_with_cap(traces_in_file: List[WekaTrace]) -> bool:
+            """Append traces up to max_entries; return True when cap reached."""
+            remaining = max_entries - len(raw_traces)
+            if remaining <= 0:
+                return True
+            raw_traces.extend(traces_in_file[:remaining])
+            return len(raw_traces) >= max_entries
 
         if self.weka_config.trace_directory:
             trace_dir = Path(self.weka_config.trace_directory)
@@ -1125,15 +1153,13 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             if not files:
                 raise ValueError(f"No JSON/JSONL files found in {trace_dir}")
 
-            max_entries = self.weka_config.num_dataset_entries
             for f in files:
                 if len(raw_traces) >= max_entries:
                     break
                 try:
                     traces_in_file = self._load_traces_from_local_file(f)
-                    remaining = max_entries - len(raw_traces)
-                    if remaining > 0:
-                        raw_traces.extend(traces_in_file[:remaining])
+                    if _append_with_cap(traces_in_file):
+                        break
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
                     if not self.weka_config.skip_invalid_files:
@@ -1141,13 +1167,17 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         elif self.weka_config.trace_files:
             for path in self.weka_config.trace_files:
+                if len(raw_traces) >= max_entries:
+                    break
                 f = Path(path)
                 if not f.is_file():
                     raise ValueError(f"Trace file does not exist: {path}")
                 if f.suffix.lower() not in {".json", ".jsonl"}:
                     raise ValueError(f"Trace file must be a .json or .jsonl file: {path}")
                 try:
-                    raw_traces.extend(self._load_traces_from_local_file(f))
+                    traces_in_file = self._load_traces_from_local_file(f)
+                    if _append_with_cap(traces_in_file):
+                        break
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
                     if not self.weka_config.skip_invalid_files:
@@ -1452,6 +1482,38 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             len(failed_trace_ids),
         )
         return sessions
+
+    @staticmethod
+    def _merge_headers_case_insensitive(target: Dict[str, str], source: Dict[str, str]) -> None:
+        for key, value in source.items():
+            key_lower = key.lower()
+            matching_keys = [existing for existing in target.keys() if existing.lower() == key_lower]
+            for existing in matching_keys:
+                del target[existing]
+            target[key] = value
+
+    def load_lazy_data(self, data: Any) -> Any:
+        api_data = super().load_lazy_data(data)
+        session_id = getattr(api_data, "session_id", None) or getattr(data, "session_id", None)
+        if not session_id:
+            return api_data
+
+        session_headers = self._session_headers_by_session_id.get(session_id)
+        if not session_headers:
+            return api_data
+
+        if api_data.headers is None:
+            api_data.headers = {}
+
+        self._merge_headers_case_insensitive(api_data.headers, session_headers)
+        if session_id not in self._logged_header_sessions:
+            logger.info(
+                "Applied %d session header(s) for session %s (session headers override global/static headers)",
+                len(session_headers),
+                session_id,
+            )
+            self._logged_header_sessions.add(session_id)
+        return api_data
 
     def _reconstruct_raw_calls(self, trace: WekaTrace) -> List[RawCall]:
         assert self.tokenizer is not None

@@ -11,6 +11,7 @@ The Weka Trace Replay capability allows you to benchmark GenAI model servers by 
 3. **Causal Propagation**: Nodes register parent-child relationships. The text output of parent nodes is dynamically cached and substituted into the prompt messages of child nodes at runtime (e.g. tool execution output is placed back in the next LLM call).
 4. **Session-based Execution**: A thread pool runs sessions concurrently. Within each session, nodes are executed as soon as their parents complete.
 5. **Think-Time Simulation**: Think times and idle gaps between turns are simulated and capped using `trace_idle_gap_cap_seconds`.
+6. **Session Header Overrides**: Each trace session can optionally carry `session_headers` (for example auth headers). These are applied to all requests in that session and override global/static headers at request-construction time.
 
 ---
 
@@ -48,6 +49,22 @@ data:
     skip_invalid_files: true
     trace_idle_gap_cap_seconds: 1.0 # Caps think-time delay between turns to 1s
 ```
+
+### Optional Trace Fields
+
+Each Weka trace record can include:
+
+```json
+{
+  "id": "trace-123",
+  "session_headers": {
+    "Authorization": "Bearer session-specific-token",
+    "x-tenant-id": "tenant-a"
+  }
+}
+```
+
+When present, these headers are attached to every request in that replay session and take precedence over `server.api_key` and `api.headers`.
 
 ---
 

@@ -380,6 +380,20 @@ class openAIModelServerClientSession(ModelServerClientSession):
             _update_headers_case_insensitive(headers, self.client.api_config.headers)
 
         if data.headers:
+            session_id = getattr(data, "session_id", None) or getattr(data, "user_session_id", None)
+            for data_key, data_value in data.headers.items():
+                key_lower = data_key.lower()
+                matching_keys = [existing_key for existing_key in headers.keys() if existing_key.lower() == key_lower]
+                for existing_key in matching_keys:
+                    existing_value = headers[existing_key]
+                    if existing_value != data_value:
+                        logger.info(
+                            "Per-request/session header override applied for session=%s header=%s old_value=%s new_value=%s",
+                            session_id,
+                            existing_key,
+                            existing_value,
+                            data_value,
+                        )
             _update_headers_case_insensitive(headers, data.headers)
 
         if self.client.api_config.session_id_header_key:
