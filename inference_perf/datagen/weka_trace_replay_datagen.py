@@ -1052,6 +1052,62 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         with self._compile_timing_jsonl_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
+    def _expand_traces_for_duplication_target(self, traces: List[WekaTrace]) -> List[WekaTrace]:
+        """Expand traces to duplicate_sessions_target *before* reconstruction.
+
+        This is Weka-specific: token synthesis is seeded by trace.id. Duplicating
+        already-built ReplaySession graphs reuses identical synthesized text. By
+        duplicating trace records first and assigning deterministic synthetic IDs,
+        each duplicate is reconstructed with a distinct seed scope.
+        """
+        target = self.weka_config.duplicate_sessions_target
+        if target is None or len(traces) >= target:
+            return traces
+
+        expanded: List[WekaTrace] = list(traces)
+        dup_counter = 0
+        src_idx = 0
+        while len(expanded) < target:
+            src = traces[src_idx % len(traces)]
+            src_idx += 1
+            dup_counter += 1
+            synthetic_trace_id = f"{src.id}__dupseed{dup_counter}"
+            expanded.append(src.model_copy(update={"id": synthetic_trace_id}))
+
+        self._emit_compile_timing(
+            "trace_duplication_prebuild",
+            {
+                "original_trace_count": len(traces),
+                "expanded_trace_count": len(expanded),
+                "duplicate_sessions_target": target,
+            },
+        )
+        logger.info(
+            "Weka prebuild duplication expanded traces from %d to %d (target=%d)",
+            len(traces),
+            len(expanded),
+            target,
+        )
+        return expanded
+
+    def initialize_sessions(self, sessions: List[ReplaySession]) -> None:
+        """Initialize sessions without base graph-level duplication.
+
+        Weka duplicates are expanded pre-build in _expand_traces_for_duplication_target.
+        Prevent ReplayGraphSessionGeneratorBase.initialize_sessions from duplicating
+        identical already-built graphs again.
+        """
+        replay_cfg = self.replay_config
+        if replay_cfg is None or replay_cfg.duplicate_sessions_target is None:
+            return super().initialize_sessions(sessions)
+
+        original_target = replay_cfg.duplicate_sessions_target
+        replay_cfg.duplicate_sessions_target = None
+        try:
+            super().initialize_sessions(sessions)
+        finally:
+            replay_cfg.duplicate_sessions_target = original_target
+
     def _load_weka_traces(self) -> List[WekaTrace]:
         """Loads traces from local files/dirs or a Hugging Face dataset.
 
@@ -1155,6 +1211,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
     # Note : By default session IDs are composed in such a way that repetititon of same session generates a different session ID.
     def _build_sessions_from_traces(self, traces: List[WekaTrace]) -> List[ReplaySession]:
+        traces = self._expand_traces_for_duplication_target(traces)
         if self.weka_config.compile_parallelism_mode == "process" and len(traces) > 1:
             return self._build_sessions_from_traces_parallel(traces)
 
