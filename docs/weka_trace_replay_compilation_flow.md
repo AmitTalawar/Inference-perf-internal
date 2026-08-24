@@ -276,6 +276,16 @@ Why:
 
 - replay should delay successor dispatch to preserve inter-call timing gaps.
 
+### 7.5 Compiled session store
+
+When `compiled_store_path` is set, each compiled `ReplayGraph` (including `__dupseed*` duplicates) is written through under `sessions/` with `session_headers`, plus a `manifest.json` that records compile identity. New stores use orjson + zstd (`*.orjson.zst`). Existing gzip-JSON stores remain readable via `manifest.codec`. Encode/decode of session files runs in a parent-process thread pool.
+
+On a later run, if `duplicate_sessions_target` is set and the store already has at least that many artifacts with a matching identity, `__init__` **skips corpus tokenization, raw trace load, reconstruct, and `build_graph`**. It seeded-shuffles manifest ids, deserializes that many session files, then continues with `initialize_sessions` as today.
+
+If the store has fewer artifacts than the target, the existing load/compile path runs for the gap only: unique traces are still loaded via `_load_weka_traces()`, store-aware expansion continues the global `__dupseed` counter from the max suffix already in the store, and only missing ids are reconstructed. Parent process writes new files after compile (workers never write the store).
+
+Compile identity (tokenizer `name_or_path`, corpus path and byte size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`, schema version) is checked before reuse. Model names are not part of identity.
+
 ---
 
 ## 8. Session Schedule Materialization

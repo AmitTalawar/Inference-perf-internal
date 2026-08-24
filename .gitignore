@@ -193,3 +193,6 @@ logs/
 
 #config files
 weka-modified.yaml
+
+#plan
+plan/

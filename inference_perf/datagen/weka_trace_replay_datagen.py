@@ -82,6 +82,13 @@ from inference_perf.datagen.otel_trace_to_replay_graph import (
     build_graph,
 )
 from inference_perf.datagen.replay_graph_types import ReplayMessage
+from inference_perf.datagen.weka_compiled_store import (
+    CompileIdentity,
+    StoredSession,
+    WekaCompiledSessionStore,
+    max_dupseed_suffix,
+    source_trace_id_from_artifact_id,
+)
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 
 logger = logging.getLogger(__name__)
@@ -791,8 +798,7 @@ def _reconstruct_raw_calls_shared(
                     decode_tokens_to_text=decode_tokens_to_text,
                 )
                 lookahead._segments = [
-                    RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content)
-                    for s in child_recon._segments
+                    RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content) for s in child_recon._segments
                 ]
                 next_creq = cp.stream_requests[k + 1]
                 next_seed = f"{cp.session_id}:turn_{k + 1}:partial_tail"
@@ -949,9 +955,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         self._session_headers_by_session_id: Dict[str, Dict[str, str]] = {}
         self._logged_header_sessions: Set[str] = set()
         self._compile_timing_jsonl_path: Optional[Path] = (
-            Path(self.weka_config.compile_timing_jsonl_path)
-            if self.weka_config.compile_timing_jsonl_path
-            else None
+            Path(self.weka_config.compile_timing_jsonl_path) if self.weka_config.compile_timing_jsonl_path else None
         )
         if self._compile_timing_jsonl_path is not None:
             self._compile_timing_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -971,65 +975,103 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         if self.tokenizer is None:
             raise ValueError("Tokenizer is required for WekaTraceReplayDataGenerator")
 
-        if self.config and self.config.corpus_file_path:
-            corpus_path = Path(self.config.corpus_file_path)
-        else:
-            corpus_path = Path(__file__).resolve().parents[1] / "assets" / "shakespeare.txt"
-
-        if not corpus_path.is_file():
-            raise FileNotFoundError(f"Prompt corpus file not found: {corpus_path}")
-
-        t_corpus_read_start = time.perf_counter()
-        corpus_text = corpus_path.read_text(encoding="utf-8")
-        corpus_read_ms = int((time.perf_counter() - t_corpus_read_start) * 1000)
-        logger.info(f"Loaded prompt corpus from: {corpus_path} ({len(corpus_text)} chars)")
-
-        base_prompt = "Pick as many lines as you can from these poem lines:\n"
-        t_corpus_tokenize_start = time.perf_counter()
-        self._tokenized_corpus = self.tokenizer.get_tokenizer().encode(base_prompt + corpus_text)
-        corpus_tokenize_ms = int((time.perf_counter() - t_corpus_tokenize_start) * 1000)
-        self._corpus_size = len(self._tokenized_corpus)
-        self._emit_compile_timing(
-            "corpus_tokenization",
-            {
-                "corpus_path": str(corpus_path),
-                "corpus_char_count": len(corpus_text),
-                "tokenized_corpus_size": self._corpus_size,
-                "corpus_read_ms": corpus_read_ms,
-                "corpus_tokenize_ms": corpus_tokenize_ms,
-            },
-        )
-
+        self._tokenized_corpus: List[int] = []
+        self._corpus_size = 0
         self._hash_id_rng = HashIdRandomGenerator(self.base_seed)
         self._cache: Dict[int, List[int]] = {}
 
-        # Load all WekaTrace records
-        t_trace_load_start = time.perf_counter()
-        traces = self._load_weka_traces()
-        trace_load_ms = int((time.perf_counter() - t_trace_load_start) * 1000)
-        self._emit_compile_timing(
-            "trace_load",
-            {
-                "trace_count": len(traces),
-                "trace_load_ms": trace_load_ms,
-            },
-        )
-        self._trace_headers_by_source_id = {
-            t.id: dict(t.session_headers)
-            for t in traces
-            if t.session_headers
-        }
-        t_session_build_start = time.perf_counter()
-        sessions = self._build_sessions_from_traces(traces)
-        session_build_ms = int((time.perf_counter() - t_session_build_start) * 1000)
-        self._emit_compile_timing(
-            "session_build_complete",
-            {
-                "session_count": len(sessions),
-                "session_build_ms": session_build_ms,
-            },
-        )
+        store = self._open_compiled_store()
+        target = self.weka_config.duplicate_sessions_target
+        sessions: Optional[List[ReplaySession]] = None
+        store_full_hit = False
+        if store is not None and target is not None and store.manifest_path.is_file() and len(store.artifact_ids) >= target:
+            store_full_hit = True
+            logger.info(
+                "Weka compiled store full hit: skipping corpus tokenization and raw trace load; "
+                "sampling %d of %d stored session(s) from %s",
+                target,
+                len(store.artifact_ids),
+                store.root,
+            )
+            t_lookup_start = time.perf_counter()
+            sessions, stored_headers = self._load_sampled_sessions_from_store(store, target)
+            lookup_ms = int((time.perf_counter() - t_lookup_start) * 1000)
+            self._trace_headers_by_source_id.update(stored_headers)
+            self._emit_compile_timing(
+                "compiled_store_lookup",
+                {
+                    "stored_count": len(store.artifact_ids),
+                    "desired_count": target,
+                    "hit_count": target,
+                    "miss_count": 0,
+                    "full_hit": True,
+                    "load_ms": lookup_ms,
+                },
+            )
+            logger.info(
+                "Weka compiled store full hit complete: loaded %d session(s) headers=%d load_ms=%d",
+                len(sessions),
+                len(stored_headers),
+                lookup_ms,
+            )
+            self._emit_compile_timing(
+                "session_build_complete",
+                {
+                    "session_count": len(sessions),
+                    "session_build_ms": lookup_ms,
+                    "full_hit": True,
+                },
+            )
+        else:
+            if store is None:
+                logger.info("Weka compiled store: compiled_store_path unset; compiling from raw traces")
+            elif target is None:
+                logger.info(
+                    "Weka compiled store: path=%s stored=%d duplicate_sessions_target unset; "
+                    "loading unique traces then lookup/write-through (no skip-raw-load)",
+                    store.root,
+                    len(store.artifact_ids),
+                )
+            elif not store.manifest_path.is_file():
+                logger.info(
+                    "Weka compiled store: empty store at %s; tokenizing corpus and compiling target=%d from raw traces",
+                    store.root,
+                    target,
+                )
+            else:
+                logger.info(
+                    "Weka compiled store partial miss: path=%s stored=%d target=%d filling=%d; "
+                    "tokenizing corpus and loading raw traces",
+                    store.root,
+                    len(store.artifact_ids),
+                    target,
+                    target - len(store.artifact_ids),
+                )
+            self._tokenize_prompt_corpus()
+            t_trace_load_start = time.perf_counter()
+            traces = self._load_weka_traces()
+            trace_load_ms = int((time.perf_counter() - t_trace_load_start) * 1000)
+            logger.info("Weka raw trace load: %d unique trace(s) in %d ms", len(traces), trace_load_ms)
+            self._emit_compile_timing(
+                "trace_load",
+                {
+                    "trace_count": len(traces),
+                    "trace_load_ms": trace_load_ms,
+                },
+            )
+            self._trace_headers_by_source_id = {t.id: dict(t.session_headers) for t in traces if t.session_headers}
+            t_session_build_start = time.perf_counter()
+            sessions = self._build_sessions_from_traces(traces, store=store)
+            session_build_ms = int((time.perf_counter() - t_session_build_start) * 1000)
+            self._emit_compile_timing(
+                "session_build_complete",
+                {
+                    "session_count": len(sessions),
+                    "session_build_ms": session_build_ms,
+                },
+            )
         t_schedule_start = time.perf_counter()
+        assert sessions is not None
         self.initialize_sessions(sessions)
         self._session_headers_by_session_id = {
             session.session_id: dict(self._trace_headers_by_source_id[session.source_id])
@@ -1038,8 +1080,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         }
         if self._session_headers_by_session_id:
             logger.info(
-                "Weka replay session headers enabled for %d session(s)",
+                "Weka replay session headers enabled for %d session(s) (store_full_hit=%s)",
                 len(self._session_headers_by_session_id),
+                store_full_hit,
             )
         schedule_build_ms = int((time.perf_counter() - t_schedule_start) * 1000)
         self._emit_compile_timing(
@@ -1063,51 +1106,260 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             "is_parallel": mode == "process",
             "compile_workers": self.weka_config.compile_workers if mode == "process" else 1,
             "compile_chunk_size": self.weka_config.compile_chunk_size if mode == "process" else 1,
-            "compile_inflight_limit": self.weka_config.compile_inflight_limit
-            if mode == "process"
-            else None,
+            "compile_inflight_limit": self.weka_config.compile_inflight_limit if mode == "process" else None,
         }
         record.update(payload)
         with self._compile_timing_jsonl_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
-    def _expand_traces_for_duplication_target(self, traces: List[WekaTrace]) -> List[WekaTrace]:
+    def _prompt_corpus_path(self) -> Path:
+        if self.config and self.config.corpus_file_path:
+            return Path(self.config.corpus_file_path).expanduser().resolve()
+        return (Path(__file__).resolve().parents[1] / "assets" / "shakespeare.txt").resolve()
+
+    def _tokenizer_name_or_path(self) -> str:
+        assert self.tokenizer is not None
+        tokenizer_instance = self.tokenizer.get_tokenizer()
+        name = getattr(tokenizer_instance, "name_or_path", "") or ""
+        return name if isinstance(name, str) else ""
+
+    def _build_compile_identity(self) -> CompileIdentity:
+        corpus_path = self._prompt_corpus_path()
+        if not corpus_path.is_file():
+            raise FileNotFoundError(f"Prompt corpus file not found: {corpus_path}")
+        return CompileIdentity(
+            tokenizer_name_or_path=self._tokenizer_name_or_path(),
+            corpus_path=str(corpus_path),
+            corpus_byte_size=corpus_path.stat().st_size,
+            base_seed=self.base_seed,
+            default_block_size=self.weka_config.default_block_size,
+            trace_idle_gap_cap_seconds=self.weka_config.trace_idle_gap_cap_seconds,
+        )
+
+    def _tokenize_prompt_corpus(self) -> None:
+        corpus_path = self._prompt_corpus_path()
+        if not corpus_path.is_file():
+            raise FileNotFoundError(f"Prompt corpus file not found: {corpus_path}")
+
+        t_corpus_read_start = time.perf_counter()
+        corpus_text = corpus_path.read_text(encoding="utf-8")
+        corpus_read_ms = int((time.perf_counter() - t_corpus_read_start) * 1000)
+        logger.info(f"Loaded prompt corpus from: {corpus_path} ({len(corpus_text)} chars)")
+
+        assert self.tokenizer is not None
+        base_prompt = "Pick as many lines as you can from these poem lines:\n"
+        t_corpus_tokenize_start = time.perf_counter()
+        self._tokenized_corpus = self.tokenizer.get_tokenizer().encode(base_prompt + corpus_text)
+        corpus_tokenize_ms = int((time.perf_counter() - t_corpus_tokenize_start) * 1000)
+        self._corpus_size = len(self._tokenized_corpus)
+        self._emit_compile_timing(
+            "corpus_tokenization",
+            {
+                "corpus_path": str(corpus_path),
+                "corpus_char_count": len(corpus_text),
+                "tokenized_corpus_size": self._corpus_size,
+                "corpus_read_ms": corpus_read_ms,
+                "corpus_tokenize_ms": corpus_tokenize_ms,
+            },
+        )
+
+    def _open_compiled_store(self) -> Optional[WekaCompiledSessionStore]:
+        store_path = self.weka_config.compiled_store_path
+        if not store_path:
+            return None
+        logger.info("Weka compiled store: opening %s", store_path)
+        store = WekaCompiledSessionStore(Path(store_path), self._build_compile_identity())
+        store.load()
+        return store
+
+    def _replay_session_from_stored(self, stored: StoredSession, index: int) -> ReplaySession:
+        return ReplaySession(
+            session_id=f"wekatrace{index}_{stored.artifact_id}",
+            source_id=stored.artifact_id,
+            session_index=index,
+            graph=stored.graph,
+        )
+
+    def _headers_from_stored(self, stored: StoredSession) -> Dict[str, Dict[str, str]]:
+        if not stored.session_headers:
+            return {}
+        return {stored.artifact_id: dict(stored.session_headers)}
+
+    def _load_sampled_sessions_from_store(
+        self, store: WekaCompiledSessionStore, target: int
+    ) -> Tuple[List[ReplaySession], Dict[str, Dict[str, str]]]:
+        ids = list(store.artifact_ids)
+        random.seed(self.base_seed)
+        random.shuffle(ids)
+        selected = ids[:target]
+        logger.info(
+            "Weka compiled store: sampled %d of %d artifact(s) with base_seed=%s",
+            len(selected),
+            len(store.artifact_ids),
+            self.base_seed,
+        )
+        sessions: List[ReplaySession] = []
+        headers: Dict[str, Dict[str, str]] = {}
+        for index, stored in enumerate(store.read_sessions(selected)):
+            sessions.append(self._replay_session_from_stored(stored, index))
+            headers.update(self._headers_from_stored(stored))
+        random.seed(self.base_seed)
+        random.shuffle(sessions)
+        return sessions, headers
+
+    def _load_all_stored_sessions(
+        self, store: WekaCompiledSessionStore
+    ) -> Tuple[List[ReplaySession], Dict[str, Dict[str, str]]]:
+        sessions: List[ReplaySession] = []
+        headers: Dict[str, Dict[str, str]] = {}
+        for index, stored in enumerate(store.read_sessions(list(store.artifact_ids))):
+            sessions.append(self._replay_session_from_stored(stored, index))
+            headers.update(self._headers_from_stored(stored))
+        return sessions, headers
+
+    @staticmethod
+    def _reassign_session_ids(sessions: List[ReplaySession]) -> None:
+        for index, session in enumerate(sessions):
+            session.session_id = f"wekatrace{index}_{session.source_id}"
+            session.session_index = index
+
+    def _write_through_sessions(
+        self,
+        store: WekaCompiledSessionStore,
+        sessions: List[ReplaySession],
+        traces: List[WekaTrace],
+    ) -> None:
+        if not sessions:
+            logger.info("Weka compiled store: write-through skipped (no newly compiled sessions) path=%s", store.root)
+            return
+        traces_by_id = {trace.id: trace for trace in traces}
+        t_write_start = time.perf_counter()
+        stored_sessions: List[StoredSession] = []
+        for session in sessions:
+            trace = traces_by_id.get(session.source_id)
+            headers: Optional[Dict[str, str]] = None
+            if trace is not None and trace.session_headers:
+                headers = dict(trace.session_headers)
+            elif session.source_id in self._trace_headers_by_source_id:
+                headers = dict(self._trace_headers_by_source_id[session.source_id])
+            stored_sessions.append(
+                StoredSession(
+                    artifact_id=session.source_id,
+                    source_trace_id=source_trace_id_from_artifact_id(session.source_id),
+                    session_headers=headers,
+                    graph=session.graph,
+                )
+            )
+        store.write_sessions(stored_sessions)
+        store.write_manifest()
+        write_ms = int((time.perf_counter() - t_write_start) * 1000)
+        written_count = len(stored_sessions)
+        self._emit_compile_timing(
+            "compiled_store_write",
+            {
+                "written_count": written_count,
+                "write_ms": write_ms,
+            },
+        )
+        logger.info(
+            "Weka compiled store write-through: wrote %d session(s) to %s in %d ms", written_count, store.root, write_ms
+        )
+
+    def _expand_traces_for_duplication_target(
+        self,
+        traces: List[WekaTrace],
+        stored_artifact_ids: Optional[Set[str]] = None,
+        desired_count: Optional[int] = None,
+    ) -> List[WekaTrace]:
         """Expand traces to duplicate_sessions_target *before* reconstruction.
 
         This is Weka-specific: token synthesis is seeded by trace.id. Duplicating
         already-built ReplaySession graphs reuses identical synthesized text. By
         duplicating trace records first and assigning deterministic synthetic IDs,
         each duplicate is reconstructed with a distinct seed scope.
+
+        When ``stored_artifact_ids`` is set, only traces whose ids are not already
+        in the store are returned, using today's global ``__dupseed`` counter
+        continued from the max suffix already present in the store.
         """
-        target = self.weka_config.duplicate_sessions_target
-        if target is None or len(traces) >= target:
+        target = desired_count if desired_count is not None else self.weka_config.duplicate_sessions_target
+        if target is None:
+            return traces
+        if not traces:
             return traces
 
-        expanded: List[WekaTrace] = list(traces)
-        dup_counter = 0
+        if stored_artifact_ids is None:
+            if len(traces) >= target:
+                return traces
+
+            expanded: List[WekaTrace] = list(traces)
+            dup_counter = 0
+            src_idx = 0
+            while len(expanded) < target:
+                src = traces[src_idx % len(traces)]
+                src_idx += 1
+                dup_counter += 1
+                synthetic_trace_id = f"{src.id}__dupseed{dup_counter}"
+                expanded.append(src.model_copy(update={"id": synthetic_trace_id}))
+
+            self._emit_compile_timing(
+                "trace_duplication_prebuild",
+                {
+                    "original_trace_count": len(traces),
+                    "expanded_trace_count": len(expanded),
+                    "duplicate_sessions_target": target,
+                },
+            )
+            logger.info(
+                "Weka prebuild duplication expanded traces from %d to %d (target=%d)",
+                len(traces),
+                len(expanded),
+                target,
+            )
+            return expanded
+
+        need = target - len(stored_artifact_ids)
+        if need <= 0:
+            return []
+
+        new_traces: List[WekaTrace] = []
+        for trace in traces:
+            if trace.id not in stored_artifact_ids:
+                new_traces.append(trace)
+                if len(new_traces) >= need:
+                    break
+
+        dup_counter = max_dupseed_suffix(stored_artifact_ids)
         src_idx = 0
-        while len(expanded) < target:
+        used_ids: Set[str] = set(stored_artifact_ids) | {t.id for t in new_traces}
+        while len(new_traces) < need:
             src = traces[src_idx % len(traces)]
             src_idx += 1
             dup_counter += 1
             synthetic_trace_id = f"{src.id}__dupseed{dup_counter}"
-            expanded.append(src.model_copy(update={"id": synthetic_trace_id}))
+            if synthetic_trace_id in used_ids:
+                continue
+            used_ids.add(synthetic_trace_id)
+            new_traces.append(src.model_copy(update={"id": synthetic_trace_id}))
 
-        self._emit_compile_timing(
-            "trace_duplication_prebuild",
-            {
-                "original_trace_count": len(traces),
-                "expanded_trace_count": len(expanded),
-                "duplicate_sessions_target": target,
-            },
-        )
-        logger.info(
-            "Weka prebuild duplication expanded traces from %d to %d (target=%d)",
-            len(traces),
-            len(expanded),
-            target,
-        )
-        return expanded
+        if any("__dupseed" in trace.id for trace in new_traces):
+            self._emit_compile_timing(
+                "trace_duplication_prebuild",
+                {
+                    "original_trace_count": len(traces),
+                    "expanded_trace_count": len(stored_artifact_ids) + len(new_traces),
+                    "duplicate_sessions_target": target,
+                    "stored_artifact_count": len(stored_artifact_ids),
+                    "new_compile_count": len(new_traces),
+                },
+            )
+            logger.info(
+                "Weka store-aware prebuild duplication: stored=%d new=%d target=%d",
+                len(stored_artifact_ids),
+                len(new_traces),
+                target,
+            )
+        return new_traces
 
     def initialize_sessions(self, sessions: List[ReplaySession]) -> None:
         """Initialize sessions without base graph-level duplication.
@@ -1239,12 +1491,134 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             return traces
         raise ValueError(f"Unsupported trace file extension for {file_path}; expected .json or .jsonl")
 
-    # Note : By default session IDs are composed in such a way that repetititon of same session generates a different session ID.
-    def _build_sessions_from_traces(self, traces: List[WekaTrace]) -> List[ReplaySession]:
-        traces = self._expand_traces_for_duplication_target(traces)
-        if self.weka_config.compile_parallelism_mode == "process" and len(traces) > 1:
-            return self._build_sessions_from_traces_parallel(traces)
+    def _build_sessions_from_traces(
+        self,
+        traces: List[WekaTrace],
+        store: Optional[WekaCompiledSessionStore] = None,
+    ) -> List[ReplaySession]:
+        if store is None:
+            logger.info("Weka session build: store unset; compiling %d loaded unique trace(s)", len(traces))
+            traces = self._expand_traces_for_duplication_target(traces)
+            sessions = self._compile_trace_list(traces)
+            random.seed(self.base_seed)
+            random.shuffle(sessions)
+            logger.info("Weka session build: compiled %d session(s) without store", len(sessions))
+            return sessions
 
+        target = self.weka_config.duplicate_sessions_target
+        stored_ids = set(store.artifact_ids)
+
+        if target is None:
+            t_lookup_start = time.perf_counter()
+            stored_by_id: Dict[str, ReplaySession] = {}
+            stored_headers: Dict[str, Dict[str, str]] = {}
+            hit_ids = [trace.id for trace in traces if store.contains(trace.id)]
+            to_compile = [trace for trace in traces if not store.contains(trace.id)]
+            for index, stored in enumerate(store.read_sessions(hit_ids)):
+                stored_by_id[stored.artifact_id] = self._replay_session_from_stored(stored, index)
+                stored_headers.update(self._headers_from_stored(stored))
+            lookup_ms = int((time.perf_counter() - t_lookup_start) * 1000)
+            self._trace_headers_by_source_id.update(stored_headers)
+            self._emit_compile_timing(
+                "compiled_store_lookup",
+                {
+                    "stored_count": len(stored_ids),
+                    "desired_count": len(traces),
+                    "hit_count": len(stored_by_id),
+                    "miss_count": len(to_compile),
+                    "full_hit": False,
+                    "load_ms": lookup_ms,
+                },
+            )
+            logger.info(
+                "Weka compiled store unique-id lookup: stored=%d unique_traces=%d hits=%d misses=%d load_ms=%d",
+                len(stored_ids),
+                len(traces),
+                len(stored_by_id),
+                len(to_compile),
+                lookup_ms,
+            )
+            compiled = self._compile_trace_list(to_compile)
+            self._write_through_sessions(store, compiled, to_compile)
+            sessions = [stored_by_id[trace.id] for trace in traces if trace.id in stored_by_id]
+            sessions.extend(compiled)
+            self._reassign_session_ids(sessions)
+            random.seed(self.base_seed)
+            random.shuffle(sessions)
+            logger.info(
+                "Weka compiled store unique-id path complete: reused=%d compiled=%d total=%d",
+                len(stored_by_id),
+                len(compiled),
+                len(sessions),
+            )
+            return sessions
+
+        t_lookup_start = time.perf_counter()
+        stored_sessions, stored_headers = self._load_all_stored_sessions(store)
+        lookup_ms = int((time.perf_counter() - t_lookup_start) * 1000)
+        logger.info(
+            "Weka compiled store fill: loaded %d stored session(s) in %d ms",
+            len(stored_sessions),
+            lookup_ms,
+        )
+        self._trace_headers_by_source_id.update(stored_headers)
+        need = target - len(stored_ids)
+        to_compile = self._expand_traces_for_duplication_target(traces, stored_artifact_ids=stored_ids, desired_count=target)
+        logger.info(
+            "Weka compiled store fill: stored=%d target=%d unique_raw=%d compiling=%d load_ms=%d",
+            len(stored_ids),
+            target,
+            len(traces),
+            len(to_compile),
+            lookup_ms,
+        )
+        self._emit_compile_timing(
+            "compiled_store_lookup",
+            {
+                "stored_count": len(stored_ids),
+                "desired_count": target,
+                "hit_count": len(stored_ids),
+                "miss_count": max(0, need),
+                "full_hit": False,
+                "load_ms": lookup_ms,
+            },
+        )
+        for trace in to_compile:
+            if trace.session_headers:
+                self._trace_headers_by_source_id[trace.id] = dict(trace.session_headers)
+        compiled = self._compile_trace_list(to_compile)
+        self._write_through_sessions(store, compiled, to_compile)
+        sessions = list(stored_sessions) + compiled
+        if len(sessions) < target:
+            raise ValueError(
+                f"Weka compiled store could not assemble {target} sessions "
+                f"(stored={len(stored_sessions)}, newly_compiled={len(compiled)}). "
+                "Increase num_dataset_entries, fix invalid traces, or lower duplicate_sessions_target."
+            )
+        if len(sessions) > target:
+            sessions = sessions[:target]
+        self._reassign_session_ids(sessions)
+        random.seed(self.base_seed)
+        random.shuffle(sessions)
+        logger.info(
+            "Weka compiled store fill complete: stored=%d newly_compiled=%d assembled=%d",
+            len(stored_sessions),
+            len(compiled),
+            len(sessions),
+        )
+        return sessions
+
+    def _compile_trace_list(self, traces: List[WekaTrace]) -> List[ReplaySession]:
+        if not traces:
+            logger.info("Weka compile: no traces to reconstruct")
+            return []
+        mode = self.weka_config.compile_parallelism_mode
+        logger.info("Weka compile: reconstructing %d trace(s) mode=%s", len(traces), mode)
+        if mode == "process" and len(traces) > 1:
+            return self._build_sessions_from_traces_parallel(traces)
+        return self._build_sessions_from_traces_sequential(traces)
+
+    def _build_sessions_from_traces_sequential(self, traces: List[WekaTrace]) -> List[ReplaySession]:
         sessions: List[ReplaySession] = []
         self._emit_compile_timing(
             "session_build_mode",
@@ -1280,7 +1654,6 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
                 build_graph_ms = int((time.perf_counter() - t_graph_start) * 1000)
 
-                # Make session ID unique per trace run
                 session_id = f"wekatrace{trace_index}_{trace.id}"
                 sessions.append(
                     ReplaySession(
@@ -1308,9 +1681,6 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 if not self.weka_config.skip_invalid_files:
                     raise
 
-        # Shuffle sessions for stress testing
-        random.seed(self.base_seed)
-        random.shuffle(sessions)
         return sessions
 
     def _build_sessions_from_traces_parallel(self, traces: List[WekaTrace]) -> List[ReplaySession]:
@@ -1397,8 +1767,6 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     logger.error(f"Failed to process Weka trace {trace.id}: {e}")
                     if not self.weka_config.skip_invalid_files:
                         raise
-            random.seed(self.base_seed)
-            random.shuffle(sessions)
             return sessions
 
         logger.info(
@@ -1472,8 +1840,6 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         for trace_index in sorted(session_by_trace_index.keys()):
             sessions.append(session_by_trace_index[trace_index])
 
-        random.seed(self.base_seed)
-        random.shuffle(sessions)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         logger.info(
             "Weka parallel compile completed in %d ms (sessions=%d failed=%d)",

@@ -305,6 +305,15 @@ class WekaTraceReplayConfig(SessionReplayConfig):
             "When unset, compile timing events are not persisted."
         ),
     )
+    compiled_store_path: Optional[str] = Field(
+        None,
+        description=(
+            "Directory for the Weka compiled-session cache. When set, ReplayGraphs "
+            "(including __dupseed duplicates) are written through on miss and reused on hit. "
+            "Write-through is always on when this path is set. "
+            "Raw trace sources remain required in config and are used on cache miss/fill."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_trace_sources(self) -> "WekaTraceReplayConfig":

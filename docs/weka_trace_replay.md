@@ -68,6 +68,52 @@ When present, these headers are attached to every request in that replay session
 
 ---
 
+## Compiled session store
+
+Set `compiled_store_path` to persist compiled `ReplayGraph`s (including `__dupseed*` duplicates) and reuse them on later runs.
+
+```yaml
+data:
+  type: weka_trace_replay
+  weka_trace_replay:
+    trace_files:
+      - /path/to/traces.jsonl
+    num_dataset_entries: 3001
+    duplicate_sessions_target: 3001
+    compiled_store_path: /path/to/weka_compiled_store
+    use_static_model: true
+    static_model_name: "my-model"
+```
+
+Behavior:
+
+- `compiled_store_path` is **optional and extra**. Exactly one of `trace_files` / `trace_directory` / `hf_dataset_path` is still required. Those sources are used on cache miss or partial fill. They are not opened on a full store hit.
+- Sample size for a store-backed run is `duplicate_sessions_target`. The store is shuffled with `load.base_seed` and the first `duplicate_sessions_target` artifacts are loaded.
+- **Full hit** (`stored_count >= duplicate_sessions_target`): skip Shakespeare/corpus tokenization and skip raw trace load. Reconstruct / `build_graph` do not run. The tokenizer is still created by `main.py` for live response token counting.
+- **Partial miss / empty store**: tokenize the corpus, load traces from the configured source (`num_dataset_entries` still caps unique raw traces), compile only missing artifacts (including new `__dupseed*` ids), and write them through. Combined session count must reach `duplicate_sessions_target` or the run fails.
+- If `duplicate_sessions_target` is unset, today's unique-trace compile path is used. When the store path is set, those unique ids are still looked up / written through after raw load (no skip-raw-load).
+- Write-through is always on when `compiled_store_path` is set. There is no separate toggle. Only the parent process writes the store.
+- New stores write `sessions/*.orjson.zst` (orjson + zstd level 1). Existing gzip-JSON stores keep `manifest.codec: json.gz` and stay readable. Session files are encoded/decoded in a parent-process thread pool (`min(n_files, cpu_count)`). Eager `initialize_sessions` is unchanged.
+
+### Compile identity
+
+A store built under one compile identity cannot be reused under another. Mismatch fails immediately:
+
+- tokenizer `name_or_path`
+- corpus path and corpus file byte size
+- `load.base_seed`
+- `default_block_size`
+- `trace_idle_gap_cap_seconds`
+- store `schema_version`
+
+Identity does **not** include `static_model_name`, `model_mapping`, or `use_static_model`. Live request payloads use `server.model_name`; stored `GraphCall.model` is ignored on the wire.
+
+### Headers
+
+Each stored session file includes `session_headers`. On a full hit, raw traces are not loaded, so headers are restored from the payload and applied per `session_id` as today.
+
+---
+
 ## 🏃 Running the Benchmark
 
 Run the benchmark with the following command:

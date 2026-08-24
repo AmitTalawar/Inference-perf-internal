@@ -5,6 +5,8 @@ This script updates each JSON object line by adding/updating:
   session_headers: { ... }
 
 It is designed to stream large files line-by-line.
+API keys are loaded from a file (one key per line) and assigned to sessions
+in round-robin order.
 """
 
 from __future__ import annotations
@@ -13,14 +15,15 @@ import argparse
 import json
 from pathlib import Path
 import tempfile
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Inject session_headers into each Weka trace record in a JSONL file. "
-            "Adds API key header and optional extra per-session header."
+            "Adds API key header (round-robin from a key file) and optional extra "
+            "per-session header."
         )
     )
     parser.add_argument(
@@ -39,9 +42,12 @@ def parse_args() -> argparse.Namespace:
         help="Rewrite the input file in place (safe temp-file replace).",
     )
     parser.add_argument(
-        "--api-key",
+        "--api-key-file",
         required=True,
-        help="API key value to inject into session_headers.",
+        help=(
+            "Path to a file with one API key per line. Empty lines are skipped. "
+            "Keys are assigned to sessions in round-robin order."
+        ),
     )
     parser.add_argument(
         "--api-key-header",
@@ -79,6 +85,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def _load_api_keys(api_key_file: Path) -> List[str]:
+    if not api_key_file.is_file():
+        raise FileNotFoundError(f"API key file does not exist: {api_key_file}")
+
+    keys: List[str] = []
+    with api_key_file.open("r", encoding="utf-8") as src:
+        for raw in src:
+            key = raw.strip()
+            if not key:
+                continue
+            keys.append(key)
+
+    if not keys:
+        raise ValueError(f"API key file contains no keys: {api_key_file}")
+    return keys
 
 
 def _build_api_key_value(api_key: str, fmt: str) -> str:
@@ -132,13 +155,14 @@ def transform_jsonl(
     input_path: Path,
     output_path: Path,
     api_key_header: str,
-    api_key_value: str,
+    api_key_values: List[str],
     session_header_key: Optional[str],
     session_header_value_template: Optional[str],
     overwrite_existing_session_headers: bool,
 ) -> tuple[int, int]:
     total = 0
     updated = 0
+    num_keys = len(api_key_values)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with input_path.open("r", encoding="utf-8") as src, output_path.open("w", encoding="utf-8") as dst:
@@ -148,7 +172,6 @@ def transform_jsonl(
                 dst.write(raw)
                 continue
 
-            total += 1
             try:
                 record = json.loads(stripped)
             except json.JSONDecodeError as exc:
@@ -157,6 +180,8 @@ def transform_jsonl(
             if not isinstance(record, dict):
                 raise ValueError(f"Expected JSON object at line {line_no}, got {type(record).__name__}")
 
+            api_key_value = api_key_values[total % num_keys]
+            total += 1
             updated_record = _inject_headers_for_record(
                 record=record,
                 api_key_header=api_key_header,
@@ -184,7 +209,8 @@ def main() -> None:
     if not args.in_place and not args.output:
         raise ValueError("Either --output must be provided, or use --in-place")
 
-    api_key_value = _build_api_key_value(args.api_key, args.api_key_format)
+    api_keys = _load_api_keys(Path(args.api_key_file))
+    api_key_values = [_build_api_key_value(key, args.api_key_format) for key in api_keys]
 
     if args.in_place:
         with tempfile.NamedTemporaryFile(
@@ -202,7 +228,7 @@ def main() -> None:
                 input_path=input_path,
                 output_path=temp_path,
                 api_key_header=args.api_key_header,
-                api_key_value=api_key_value,
+                api_key_values=api_key_values,
                 session_header_key=args.session_header_key,
                 session_header_value_template=args.session_header_value_template,
                 overwrite_existing_session_headers=args.overwrite_existing_session_headers,
@@ -219,7 +245,7 @@ def main() -> None:
             input_path=input_path,
             output_path=output_path,
             api_key_header=args.api_key_header,
-            api_key_value=api_key_value,
+            api_key_values=api_key_values,
             session_header_key=args.session_header_key,
             session_header_value_template=args.session_header_value_template,
             overwrite_existing_session_headers=args.overwrite_existing_session_headers,
@@ -227,11 +253,14 @@ def main() -> None:
 
     print(f"Input: {input_path}")
     print(f"Output: {output_path}")
+    print(f"API key file: {args.api_key_file}")
+    print(f"API keys loaded: {len(api_keys)}")
     print(f"Records processed: {total}")
     print(f"Records updated: {updated}")
     print(
         f"Injected header: {args.api_key_header} "
-        f"(format={args.api_key_format}, value={'Bearer <api_key>' if args.api_key_format == 'bearer' else '<api_key>'})"
+        f"(format={args.api_key_format}, assignment=round-robin, "
+        f"value={'Bearer <api_key>' if args.api_key_format == 'bearer' else '<api_key>'})"
     )
     if args.session_header_key:
         print(
