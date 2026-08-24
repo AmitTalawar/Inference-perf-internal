@@ -15,6 +15,7 @@
 3. [Full Configuration Examples](#full-configuration-examples)
 4. [Advanced Use Cases](#advanced-use-cases)
    - [OpenTelemetry Trace Replay](#opentelemetry-trace-replay)
+   - [Weka Trace Replay](#weka-trace-replay)
 
 ## Overview
 
@@ -46,7 +47,7 @@ Configures the test data generation methodology:
 
 ```yaml
 data:
-  type: mock|shareGPT|synthetic|random|shared_prefix|cnn_dailymail|billsum_conversations|infinity_instruct|otel_trace_replay|visionarena # Data generation type
+  type: mock|shareGPT|synthetic|random|shared_prefix|cnn_dailymail|billsum_conversations|infinity_instruct|otel_trace_replay|weka_trace_replay|visionarena # Data generation type
   path: ./data/shareGPT/ShareGPT_V3_unfiltered_cleaned_split.json # For shareGPT type, path where dataset to be used is present. Path needs to be set for cnn_dailymail, billsum_conversations and infinity_instruct as well
   input_distribution:                                 # For synthetic/random types
     min: 10                                           # Minimum prompt length (tokens)
@@ -78,7 +79,7 @@ data:
       std_dev: 5
 ```
 
-**Note:** For `otel_trace_replay` type, see the [OpenTelemetry Trace Replay](#opentelemetry-trace-replay) section for complete configuration details.
+**Note:** For `otel_trace_replay` type, see the [OpenTelemetry Trace Replay](#opentelemetry-trace-replay) section. For `weka_trace_replay`, see [Weka Trace Replay](#weka-trace-replay).
 
 #### Multimodal Data Generation
 
@@ -157,6 +158,7 @@ load:
   num_workers: 4                    # Concurrent worker threads (default: CPU_cores)
   worker_max_concurrency: 10        # Max concurrent requests per worker
   worker_max_tcp_connections: 2500  # Max TCP connections per worker
+  request_timeout: 300              # Optional: per-request HTTP timeout in seconds
   base_seed: 12345                  # Optional: base random seed for reproducibility (default: current time in ms)
   lora_traffic_split:               # Optional: MultiLoRA traffic splitting
     - name: adapter_1               # LoRA adapter name
@@ -165,7 +167,7 @@ load:
       split: 0.5
 ```
 
-**Note:** `trace_session_replay` load type has different stage parameters. See [OpenTelemetry Trace Replay](#opentelemetry-trace-replay) for configuration details.
+**Note:** `trace_session_replay` load type has different stage parameters. See [OpenTelemetry Trace Replay](#opentelemetry-trace-replay) or [Weka Trace Replay](#weka-trace-replay) for configuration details. `request_timeout` is per-request, in **seconds**. `base_seed` is the reproducibility seed for Weka prompt reconstruction, compiled-store sampling, and session shuffle.
 
 #### Load Sweeps
 
@@ -568,3 +570,125 @@ Unlike standard data generators that produce independent requests, OTel trace re
 4. Tracks session completion and starts new sessions as slots become available
 
 This design preserves the causal structure of the original workload while allowing the load generator to control session-level concurrency and throughput.
+
+### Weka Trace Replay
+
+Replay Weka KV-cache-tester traces (`data.type: weka_trace_replay`) as session graphs. Requires `load.type: trace_session_replay`. Prompt text is synthesized deterministically from block hash IDs (tokenizer + corpus + `load.base_seed`), then compiled into a replay DAG.
+
+Exactly one raw source is required: `trace_files`, `trace_directory`, or `hf_dataset_path`. Optional `compiled_store_path` is an extra cache; it does not replace those sources.
+
+#### Example (mirrors a typical high-concurrency YAML)
+
+```yaml
+load:
+  type: trace_session_replay
+  stages:
+    - concurrent_sessions: 3000   # max sessions in flight
+      num_sessions: 3000          # sessions dispatched in this stage
+  num_workers: 64
+  worker_max_concurrency: 20000
+  worker_max_tcp_connections: 2500   # optional; default 2500
+  request_timeout: 300               # seconds (optional)
+  base_seed: 1787548644060           # reconstruction + shuffle + store sample
+
+api:
+  type: chat
+  streaming: true
+
+server:
+  type: vllm
+  model_name: "served-model-alias"   # value sent on the HTTP wire
+  base_url: "http://localhost:8000"
+
+tokenizer:
+  pretrained_model_name_or_path: poolside/Laguna-XS-2.1
+
+data:
+  type: weka_trace_replay
+  weka_trace_replay:
+    trace_files:
+      - "path/to/traces.jsonl"
+    num_dataset_entries: 3000
+    duplicate_sessions_target: 3000
+    compiled_store_path: "path/to/compile_artifacts"
+    compile_parallelism_mode: "process"
+    compile_workers: 64
+    compile_inflight_limit: 64
+    use_static_model: true
+    static_model_name: "poolside/Laguna-XS-2.1"
+    default_block_size: 64
+    skip_invalid_files: true
+```
+
+#### Load keys used by this path
+
+| Key | What it does |
+|-----|----------------|
+| `load.type` | Must be `trace_session_replay`. |
+| `stages[].concurrent_sessions` | Max sessions active at once (`0` = unlimited). |
+| `stages[].num_sessions` | How many sessions this stage dispatches. Must not exceed the compiled corpus size. |
+| `num_workers` | Worker processes for live HTTP replay (not compile workers). |
+| `worker_max_concurrency` | Max in-flight request tasks per worker, including events blocked on predecessors. |
+| `worker_max_tcp_connections` | Max TCP connections per worker (default `2500`). |
+| `request_timeout` | Per-request HTTP timeout in **seconds**. Omit for no extra timeout. |
+| `base_seed` | Seed for hash-id prompt synthesis, session shuffle, and compiled-store sampling. Also part of compiled-store identity. |
+
+Stage extras shared with OTel (`session_rate`, `timeout`) apply here too.
+
+#### `data.weka_trace_replay` keys (active)
+
+**Sources (exactly one):**
+
+| Key | What it does |
+|-----|----------------|
+| `trace_files` | List of `.json` / `.jsonl` files. `num_dataset_entries` caps how many unique traces are read (same as directory). |
+| `trace_directory` | All `.json` / `.jsonl` in a directory, sorted, then capped by `num_dataset_entries`. |
+| `hf_dataset_path` | Hugging Face dataset; downloads `traces.jsonl`. String repo id or `{path, revision, split, ...}`. |
+
+**Corpus size and duplication:**
+
+| Key | What it does |
+|-----|----------------|
+| `num_dataset_entries` | Max **unique** raw traces to load (default `100`). Used on cache miss / fill, not as the store sample size. |
+| `duplicate_sessions_target` | Target compiled session count. Weka expands traces **before** reconstruct with ids `{original_id}__dupseed{N}` (each duplicate is a full compile, not a shared graph). When `compiled_store_path` is set, this is also how many sessions to sample from the store. |
+
+**Compiled session store:**
+
+| Key | What it does |
+|-----|----------------|
+| `compiled_store_path` | Directory for compiled `ReplayGraph` cache. Write-through on miss. Full hit (`stored >= duplicate_sessions_target`) skips corpus tokenization and raw trace load. Identity mismatch (tokenizer name, corpus path/size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`) fails the run. Model name is not part of identity. |
+
+**Compile parallelism:**
+
+| Key | What it does |
+|-----|----------------|
+| `compile_parallelism_mode` | `off` (default): sequential compile. `process`: one process per in-flight trace. |
+| `compile_workers` | Process pool size when mode is `process` (default `1`). |
+| `compile_inflight_limit` | Max traces compiling at once (refill as they finish). If unset, `compile_chunk_size` is the fallback. |
+| `compile_chunk_size` | Legacy batch/inflight fallback (default `1`). Prefer `compile_inflight_limit`. |
+| `compile_timing_jsonl_path` | Optional JSONL of compile-phase timings. Unset = no timing file. |
+
+**Model and reconstruction:**
+
+| Key | What it does |
+|-----|----------------|
+| `use_static_model` / `static_model_name` | Required together when static mapping is used. Stamps compiled graph `GraphCall.model`. The OpenAI/vLLM client still sends **`server.model_name`** on the wire (deployment alias). |
+| `model_mapping` | Alternative to static model: map trace model names → target names at compile time. |
+| `default_block_size` | Token block size if the trace omits `block_size` (default `64`). Part of compiled-store identity. |
+| `trace_idle_gap_cap_seconds` | Cap idle gaps between request starts (default `60`). `<= 0` disables warping. Part of compiled-store identity. |
+| `skip_invalid_files` | Skip bad files/rows instead of failing (default `false`). |
+
+**Also applied at schedule / send time (inherited, not Weka-specific fields):**
+
+| Key | What it does |
+|-----|----------------|
+| `max_wait_ms` | Cap per-event wait after predecessors (default `15000`). |
+| `inject_random_session_id` | Inject a random marker into unique prompt segments. Duplicate sessions get this automatically. |
+| `override_tool_call_max_tokens` | Raise max tokens for tool-call turns (default `true`). |
+| `data.corpus_file_path` | Optional prompt corpus instead of bundled Shakespeare. Used when compiling; skipped on a full store hit. |
+
+Optional per-trace JSON field `session_headers` is applied on every request in that session (including after a store full hit, because headers are stored with the graph).
+
+**Present in the schema but unused on the current Weka path** (setting them has no effect): `ignore_trace_delays`, `use_think_time_only`, `default_max_tokens`, `include_errors`.
+
+See [Weka Trace Replay](weka_trace_replay.md) for store layout, identity, and run instructions.
