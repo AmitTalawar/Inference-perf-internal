@@ -84,6 +84,14 @@ def parse_args() -> argparse.Namespace:
             "Default behavior merges and overwrites only keys being injected."
         ),
     )
+    parser.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "Skip lines that are not valid JSON objects instead of aborting. "
+            "Skipped lines are omitted from the output."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -159,9 +167,11 @@ def transform_jsonl(
     session_header_key: Optional[str],
     session_header_value_template: Optional[str],
     overwrite_existing_session_headers: bool,
-) -> tuple[int, int]:
+    skip_invalid: bool = False,
+) -> tuple[int, int, int]:
     total = 0
     updated = 0
+    skipped = 0
     num_keys = len(api_key_values)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,9 +185,20 @@ def transform_jsonl(
             try:
                 record = json.loads(stripped)
             except json.JSONDecodeError as exc:
+                if skip_invalid:
+                    print(f"Skipping invalid JSON at line {line_no}: {exc}")
+                    skipped += 1
+                    continue
                 raise ValueError(f"Invalid JSON at line {line_no}: {exc}") from exc
 
             if not isinstance(record, dict):
+                if skip_invalid:
+                    print(
+                        f"Skipping non-object JSON at line {line_no}: "
+                        f"expected object, got {type(record).__name__}"
+                    )
+                    skipped += 1
+                    continue
                 raise ValueError(f"Expected JSON object at line {line_no}, got {type(record).__name__}")
 
             api_key_value = api_key_values[total % num_keys]
@@ -193,7 +214,7 @@ def transform_jsonl(
             dst.write(json.dumps(updated_record, ensure_ascii=False) + "\n")
             updated += 1
 
-    return total, updated
+    return total, updated, skipped
 
 
 def main() -> None:
@@ -224,7 +245,7 @@ def main() -> None:
             temp_path = Path(tmp.name)
 
         try:
-            total, updated = transform_jsonl(
+            total, updated, skipped = transform_jsonl(
                 input_path=input_path,
                 output_path=temp_path,
                 api_key_header=args.api_key_header,
@@ -232,6 +253,7 @@ def main() -> None:
                 session_header_key=args.session_header_key,
                 session_header_value_template=args.session_header_value_template,
                 overwrite_existing_session_headers=args.overwrite_existing_session_headers,
+                skip_invalid=args.skip_invalid,
             )
             temp_path.replace(input_path)
         except Exception:
@@ -241,7 +263,7 @@ def main() -> None:
         output_path = input_path
     else:
         output_path = Path(args.output)
-        total, updated = transform_jsonl(
+        total, updated, skipped = transform_jsonl(
             input_path=input_path,
             output_path=output_path,
             api_key_header=args.api_key_header,
@@ -249,6 +271,7 @@ def main() -> None:
             session_header_key=args.session_header_key,
             session_header_value_template=args.session_header_value_template,
             overwrite_existing_session_headers=args.overwrite_existing_session_headers,
+            skip_invalid=args.skip_invalid,
         )
 
     print(f"Input: {input_path}")
@@ -257,6 +280,7 @@ def main() -> None:
     print(f"API keys loaded: {len(api_keys)}")
     print(f"Records processed: {total}")
     print(f"Records updated: {updated}")
+    print(f"Records skipped: {skipped}")
     print(
         f"Injected header: {args.api_key_header} "
         f"(format={args.api_key_format}, assignment=round-robin, "
