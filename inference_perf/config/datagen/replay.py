@@ -132,6 +132,18 @@ class SessionReplayConfig(StrictBaseModel):
         description="Maximum inter-event wait time in milliseconds. Caps the delay between predecessor completion and event dispatch to avoid reproducing unusually long tool/agent execution times from the original trace.",
     )
 
+    clamp_substituted_output_to_recorded: bool = Field(
+        False,
+        description=(
+            "When True, truncate each live substituted assistant message to the "
+            "character length of the recorded slot it replaces. Keeps growing-context "
+            "replay from exceeding the compiled prompt size when the live model "
+            "emits longer text than the trace slice (for example a reasoning model "
+            "filling a large Weka `out` budget). Default False preserves full live "
+            "output substitution."
+        ),
+    )
+
     # Error handling
     include_errors: bool = Field(True, description="Include spans with error status")
     skip_invalid_files: bool = Field(False, description="Skip invalid trace files instead of failing")

@@ -117,6 +117,7 @@ The `data.otel_trace_replay` section controls what traces to replay and how to p
 | `filter` | string | No | Lambda expression applied to each trace record before replay. Evaluated via `eval()` — use only with trusted inputs. Example: `"lambda x: x['benchmark'] == 'gsm8k'"`. Applies uniformly across all three trace sources |
 | `bad_tool_call_handling` | enum | No (default: `none`) | How to handle tool_calls whose `function.arguments` is not valid JSON. `none`: no mitigation (upstream behavior). `use_recorded`: substitute the recorded assistant message at the affected slot. See [Bad tool-call handling](#bad-tool-call-handling) |
 | `disable_output_substitution` | boolean | No (default: `false`) | When `true`, replay each call with its recorded assistant output (text and tool calls) instead of substituting the live output from predecessor calls. Predecessor wait timing is still enforced. Cannot be combined with `inject_random_session_id` or `duplicate_sessions_target` (those trigger substitution and would contradict this flag — config validation rejects the combination) |
+| `clamp_substituted_output_to_recorded` | boolean | No (default: `false`) | When `true`, truncate each live substituted assistant message to the character length of the recorded slot it replaces, so next-turn prompts stay near the compiled size |
 
 **Examples:**
 

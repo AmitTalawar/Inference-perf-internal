@@ -117,6 +117,73 @@ def _detect_bad_tool_calls(
     return bad
 
 
+def _content_as_text(content: Any) -> str:
+    """Flatten a chat-message content value to plain text for length comparison."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in ("text", "input_text"):
+                parts.append(str(part.get("text") or ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        return "".join(parts)
+    return str(content)
+
+
+def _truncate_content(content: Any, max_chars: int) -> Any:
+    """Truncate string or text-part list content to at most max_chars of text."""
+    if isinstance(content, str):
+        return content[:max_chars] if len(content) > max_chars else content
+    if isinstance(content, list):
+        remaining = max_chars
+        out: List[Any] = []
+        for part in content:
+            if remaining <= 0:
+                break
+            if isinstance(part, dict) and part.get("type") in ("text", "input_text"):
+                text = str(part.get("text") or "")
+                if len(text) <= remaining:
+                    out.append(part)
+                    remaining -= len(text)
+                else:
+                    new_part = dict(part)
+                    new_part["text"] = text[:remaining]
+                    out.append(new_part)
+                    remaining = 0
+            elif isinstance(part, str):
+                if len(part) <= remaining:
+                    out.append(part)
+                    remaining -= len(part)
+                else:
+                    out.append(part[:remaining])
+                    remaining = 0
+            else:
+                out.append(part)
+        return out
+    return content
+
+
+def _clamp_live_message_to_recorded(live: Dict[str, Any], recorded: Dict[str, Any]) -> Dict[str, Any]:
+    """Truncate live assistant content to the recorded slot's character length.
+
+    Also drops reasoning_content/reasoning: those fields have no recorded Weka
+    counterpart and would otherwise inflate the next-turn prompt.
+    """
+    clamped = dict(live)
+    recorded_len = len(_content_as_text(recorded.get("content")))
+    live_content = clamped.get("content")
+    live_len = len(_content_as_text(live_content))
+    if live_len > recorded_len:
+        clamped["content"] = _truncate_content(live_content, recorded_len)
+    clamped.pop("reasoning_content", None)
+    clamped.pop("reasoning", None)
+    return clamped
+
+
 # --- end bad_tool_call_handling --------------------------------------------
 
 
@@ -347,6 +414,9 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
     # output; the recorded assistant messages are sent as-is. Predecessor wait
     # timing is still enforced.
     disable_output_substitution: bool = False
+    # When True, truncate live substituted assistant content to the recorded
+    # slot's character length so next-turn prompts stay near compiled size.
+    clamp_substituted_output_to_recorded: bool = False
     # Set by _build_messages_with_substitution when it calls record_failure
     # early (e.g. recorded fallback also malformed). Lets the caller pass the
     # right reason string to _fail_and_notify instead of a generic fallback.
@@ -615,6 +685,15 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                                 # Record the position of this assistant message so the post-pass
                                 # can rewrite tool_call_id in the role:tool messages that follow.
                                 pending_id_rewrites.append((len(result), live_tool_calls))
+                            if self.clamp_substituted_output_to_recorded:
+                                live_len = len(_content_as_text(actual_message.get("content")))
+                                recorded_len = len(_content_as_text(seg_msgs[0].get("content")))
+                                actual_message = _clamp_live_message_to_recorded(actual_message, seg_msgs[0])
+                                if live_len > recorded_len:
+                                    logger.debug(
+                                        f"Event {self.event_id}: clamped live output from "
+                                        f"{seg.source_event_id} from {live_len} to {recorded_len} chars"
+                                    )
                             result.append(actual_message)
                             logger.debug(
                                 f"Event {self.event_id}: substituted output segment with structured message from {seg.source_event_id}"
@@ -649,6 +728,17 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                             for msg in seg_msgs:
                                 substituted = dict(msg)
                                 substituted["content"] = actual_output
+                                if self.clamp_substituted_output_to_recorded:
+                                    recorded_len = len(_content_as_text(msg.get("content")))
+                                    live_len = len(_content_as_text(actual_output))
+                                    if live_len > recorded_len:
+                                        substituted["content"] = _truncate_content(actual_output, recorded_len)
+                                        logger.debug(
+                                            f"Event {self.event_id}: clamped live output text from "
+                                            f"{seg.source_event_id} from {live_len} to {recorded_len} chars"
+                                        )
+                                    substituted.pop("reasoning_content", None)
+                                    substituted.pop("reasoning", None)
                                 result.append(substituted)
                             logger.debug(
                                 f"Event {self.event_id}: substituted output segment with text output from {seg.source_event_id}"
@@ -1751,6 +1841,11 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             disable_output_substitution=getattr(self.replay_config, "disable_output_substitution", False)
             if self.replay_config
             else False,
+            clamp_substituted_output_to_recorded=(
+                getattr(self.replay_config, "clamp_substituted_output_to_recorded", False) is True
+                if self.replay_config
+                else False
+            ),
             # Back-reference so the event can evict this session from the worker once drained.
             generator=self,
         )

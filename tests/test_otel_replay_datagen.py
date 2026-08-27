@@ -58,7 +58,7 @@ from inference_perf.datagen.replay_graph_session_datagen import (
     SessionInferenceInfo,
     WorkerSessionTracker,
 )
-from inference_perf.config.datagen.replay import BadToolCallHandling, OTelTraceReplayConfig
+from inference_perf.config.datagen.replay import BadToolCallHandling, OTelTraceReplayConfig, WekaTraceReplayConfig
 from inference_perf.payloads import RequestMetrics, Text
 from inference_perf.datagen.otel_trace_to_replay_graph import (
     build_graph,
@@ -462,6 +462,114 @@ class TestSessionChatCompletionAPIData:
         # ... but the recorded assistant content is preserved, NOT substituted
         # with the live "Predecessor output".
         assert api_data.messages[1].content == "RECORDED"
+
+    @pytest.mark.asyncio
+    async def test_clamp_substituted_output_truncates_structured_live_message(self) -> None:
+        """Live assistant text longer than the recorded slot is truncated when clamping."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        live = "LIVE_OUTPUT_THAT_IS_MUCH_LONGER_THAN_RECORDED"
+        registry.record(
+            "session_1:event_0",
+            live,
+            [],
+            output_message={"role": "assistant", "content": live, "reasoning_content": "hidden think"},
+        )
+        recorded = "REC"
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="Question"), ChatMessage(role="assistant", content=recorded)],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            predecessor_event_ids=["session_1:event_0"],
+            input_segments=[
+                InputSegment(type="unique", message_count=1, token_count=5),
+                InputSegment(type="output", message_count=1, token_count=10, source_event_id="session_1:event_0"),
+            ],
+            original_messages=[
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": recorded},
+            ],
+            clamp_substituted_output_to_recorded=True,
+        )
+
+        await api_data.wait_for_predecessors_and_substitute()
+
+        assert api_data.skip_request is False
+        assert api_data.messages[1].content == live[: len(recorded)]
+        assert api_data.messages[1].reasoning_content is None
+
+    @pytest.mark.asyncio
+    async def test_clamp_substituted_output_truncates_text_fallback(self) -> None:
+        """Text-only registry entries are also clamped to the recorded slot length."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        live = "ABCDEFGHIJKLMNOP"
+        registry.record("session_1:event_0", live, [])
+        recorded = "XYZ"
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="Question"), ChatMessage(role="assistant", content=recorded)],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            predecessor_event_ids=["session_1:event_0"],
+            input_segments=[
+                InputSegment(type="unique", message_count=1, token_count=5),
+                InputSegment(type="output", message_count=1, token_count=10, source_event_id="session_1:event_0"),
+            ],
+            original_messages=[
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": recorded},
+            ],
+            clamp_substituted_output_to_recorded=True,
+        )
+
+        await api_data.wait_for_predecessors_and_substitute()
+
+        assert api_data.messages[1].content == live[: len(recorded)]
+
+    @pytest.mark.asyncio
+    async def test_clamp_substituted_output_keeps_shorter_live_content(self) -> None:
+        """Clamping must not pad or replace live text that is already within budget."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        live = "HI"
+        registry.record(
+            "session_1:event_0",
+            live,
+            [],
+            output_message={"role": "assistant", "content": live},
+        )
+        recorded = "RECORDED"
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="Question"), ChatMessage(role="assistant", content=recorded)],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            predecessor_event_ids=["session_1:event_0"],
+            input_segments=[
+                InputSegment(type="unique", message_count=1, token_count=5),
+                InputSegment(type="output", message_count=1, token_count=10, source_event_id="session_1:event_0"),
+            ],
+            original_messages=[
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": recorded},
+            ],
+            clamp_substituted_output_to_recorded=True,
+        )
+
+        await api_data.wait_for_predecessors_and_substitute()
+
+        assert api_data.messages[1].content == live
 
 
 # ---------------------------------------------------------------------------
@@ -2352,3 +2460,24 @@ class TestDisableOutputSubstitutionValidation:
             duplicate_sessions_target=10,
         )
         assert cfg.disable_output_substitution is False
+
+
+class TestClampSubstitutedOutputConfig:
+    def test_default_is_false_on_weka_and_otel(self) -> None:
+        otel = OTelTraceReplayConfig(trace_files=["/tmp/t.json"])
+        weka = WekaTraceReplayConfig(
+            trace_files=["/tmp/t.json"],
+            use_static_model=True,
+            static_model_name="m",
+        )
+        assert otel.clamp_substituted_output_to_recorded is False
+        assert weka.clamp_substituted_output_to_recorded is False
+
+    def test_weka_accepts_clamp_flag(self) -> None:
+        cfg = WekaTraceReplayConfig(
+            trace_files=["/tmp/t.json"],
+            use_static_model=True,
+            static_model_name="m",
+            clamp_substituted_output_to_recorded=True,
+        )
+        assert cfg.clamp_substituted_output_to_recorded is True
