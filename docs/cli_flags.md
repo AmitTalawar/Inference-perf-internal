@@ -134,6 +134,7 @@ These command line flags are automatically generated from the CLI parser. The gl
 | `--data.otel_trace_replay.inject_random_session_id` | boolean | Inject random string into unique segments to invalidate KV-cache between sessions |
 | `--data.otel_trace_replay.duplicate_sessions_target` | int | Target number of sessions to reach by duplicating existing sessions. If None, no duplication occurs. |
 | `--data.otel_trace_replay.max_wait_ms` | int | Maximum inter-event wait time in milliseconds. Caps the delay between predecessor completion and event dispatch to avoid reproducing unusually long tool/agent execution times from the original trace. |
+| `--data.otel_trace_replay.clamp_substituted_output_to_recorded` | boolean | When True, truncate each live substituted assistant message to the character length of the recorded slot it replaces. Keeps growing-context replay from exceeding the compiled prompt size when the live model emits longer text than the trace slice (for example a reasoning model filling a large Weka `out` budget). Default False preserves full live output substitution. |
 | `--data.otel_trace_replay.include_errors` | boolean | Include spans with error status |
 | `--data.otel_trace_replay.skip_invalid_files` | boolean | Skip invalid trace files instead of failing |
 | `--data.otel_trace_replay.trace_directory` | str | Directory containing OTel JSON trace files |
@@ -157,6 +158,7 @@ Security: Filter expressions use eval() and should only contain trusted input. |
 | `--data.weka_trace_replay.inject_random_session_id` | boolean | Inject random string into unique segments to invalidate KV-cache between sessions |
 | `--data.weka_trace_replay.duplicate_sessions_target` | int | Target number of sessions to reach by duplicating existing sessions. If None, no duplication occurs. |
 | `--data.weka_trace_replay.max_wait_ms` | int | Maximum inter-event wait time in milliseconds. Caps the delay between predecessor completion and event dispatch to avoid reproducing unusually long tool/agent execution times from the original trace. |
+| `--data.weka_trace_replay.clamp_substituted_output_to_recorded` | boolean | When True, truncate each live substituted assistant message to the character length of the recorded slot it replaces. Keeps growing-context replay from exceeding the compiled prompt size when the live model emits longer text than the trace slice (for example a reasoning model filling a large Weka `out` budget). Default False preserves full live output substitution. |
 | `--data.weka_trace_replay.include_errors` | boolean | Include spans with error status |
 | `--data.weka_trace_replay.skip_invalid_files` | boolean | Skip invalid trace files instead of failing |
 | `--data.weka_trace_replay.trace_directory` | str | Directory containing Weka JSON trace files |
@@ -170,6 +172,12 @@ Any extra keys in the dict are passed as kwargs to datasets.load_dataset(). |
 | `--data.weka_trace_replay.use_think_time_only` | boolean | Only use think_time attribute instead of timestamps |
 | `--data.weka_trace_replay.default_block_size` | int | Default block size if not specified in trace |
 | `--data.weka_trace_replay.num_dataset_entries` | int | Max number of dataset traces to load from HuggingFace |
+| `--data.weka_trace_replay.compile_parallelism_mode` | string | Weka compile-time parallelism mode. 'off' keeps sequential trace materialization; 'process' materializes traces in parallel worker processes. |
+| `--data.weka_trace_replay.compile_workers` | int | Number of worker processes for compile_parallelism_mode='process'. Ignored when compile_parallelism_mode='off'. |
+| `--data.weka_trace_replay.compile_chunk_size` | int | Chunk size for process-pool map scheduling during Weka compile-time parallel materialization. Ignored when compile_parallelism_mode='off'. |
+| `--data.weka_trace_replay.compile_inflight_limit` | int | Maximum number of traces kept in-flight concurrently during process-based Weka compile scheduling. When unset, compile_chunk_size is used as a backward-compatible fallback. |
+| `--data.weka_trace_replay.compile_timing_jsonl_path` | str | Optional path to write compile-stage timing events as JSONL. When unset, compile timing events are not persisted. |
+| `--data.weka_trace_replay.compiled_store_path` | str | Directory for the Weka compiled-session cache. When set, ReplayGraphs (including __dupseed duplicates) are written through on miss and reused on hit. Write-through is always on when this path is set. Raw trace sources remain required in config and are used on cache miss/fill. |
 | `--data.conversation_replay.seed` | int | Random seed for deterministic generation |
 | `--data.conversation_replay.num_conversations` | int | Number of conversation blueprints to generate |
 | `--data.conversation_replay.shared_system_prompt_len` | int | Fixed shared system prompt length in tokens |
@@ -275,6 +283,8 @@ Any extra keys in the dict are passed as kwargs to datasets.load_dataset(). |
 | `--server.api_key` | str | API key sent as a bearer token with each request. |
 | `--server.cert_path` | str | Path to a client TLS certificate file. |
 | `--server.key_path` | str | Path to the private key for the client TLS certificate. |
+| `--server.ca_cert_path` | str | Path to a CA certificate file to trust when verifying the server TLS certificate. |
+| `--server.verify_ssl` | boolean | Verify the server TLS certificate. Set to false for self-signed certificates. |
 | `--tokenizer.pretrained_model_name_or_path` | str | HuggingFace model name or local path of the tokenizer to load. |
 | `--tokenizer.trust_remote_code` | boolean | Allow the tokenizer to execute code from its repository when loading. |
 | `--tokenizer.token` | str | HuggingFace access token used to download the tokenizer. |

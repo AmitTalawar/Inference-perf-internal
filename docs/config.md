@@ -197,7 +197,13 @@ server:
   base_url: "http://0.0.0.0:8000"                     # Required server endpoint
   ignore_eos: true                                    # Whether to ignore End-of-Sequence tokens
   api_key: ""                                         # Optional API key for authenticated endpoints
+  cert_path: null                                     # Optional client TLS certificate (mTLS)
+  key_path: null                                      # Optional private key for the client TLS certificate
+  ca_cert_path: null                                  # Optional CA cert to trust (private / self-signed CA)
+  verify_ssl: true                                    # Set false to skip TLS verification (self-signed certs)
 ```
+
+For HTTPS endpoints that use a self-signed certificate, either set `ca_cert_path` to the CA (or server) certificate file, or set `verify_ssl: false`. Skipping verification is appropriate only on trusted networks.
 
 ### Metrics Collection
 
@@ -450,6 +456,7 @@ data:
 
     # Output replay fidelity (default disabled)
     disable_output_substitution: false            # true = send recorded assistant outputs as-is (no live substitution); conflicts with inject_random_session_id / duplicate_sessions_target
+    clamp_substituted_output_to_recorded: false   # true = truncate live substituted assistant text to the recorded slot length
 
 load:
   type: trace_session_replay                      # Required for otel_trace_replay
@@ -685,6 +692,7 @@ Stage extras shared with OTel (`session_rate`, `timeout`) apply here too.
 | `max_wait_ms` | Cap per-event wait after predecessors (default `15000`). |
 | `inject_random_session_id` | Inject a random marker into unique prompt segments. Duplicate sessions get this automatically. |
 | `override_tool_call_max_tokens` | Raise max tokens for tool-call turns (default `true`). |
+| `clamp_substituted_output_to_recorded` | Truncate each live substituted assistant message to the recorded slot's character length (default `false`). Use when a reasoning model fills a large Weka `out` budget and the next-turn prompt would exceed context. |
 | `data.corpus_file_path` | Optional prompt corpus instead of bundled Shakespeare. Used when compiling; skipped on a full store hit. |
 
 Optional per-trace JSON field `session_headers` is applied on every request in that session (including after a store full hit, because headers are stored with the graph).

@@ -14,8 +14,12 @@
 import pytest
 import asyncio
 import aiohttp
-from unittest.mock import AsyncMock, MagicMock
-from inference_perf.client.modelserver.openai_client import openAIModelServerClientSession, OpenAIMetrics
+from unittest.mock import AsyncMock, MagicMock, patch
+from inference_perf.client.modelserver.openai_client import (
+    _connector_ssl,
+    openAIModelServerClientSession,
+    OpenAIMetrics,
+)
 from inference_perf.client.modelserver.metrics import Metric, CounterResult
 from inference_perf.apis import AnthropicMessagesAPIData, ChatMessage, ErrorResponseInfo, InferenceInfo
 from inference_perf.apis.anthropic_messages import ANTHROPIC_VERSION
@@ -35,6 +39,8 @@ def mock_client() -> MagicMock:
     client.metrics_collector = MagicMock()
     client.cert_path = None
     client.key_path = None
+    client.ca_cert_path = None
+    client.verify_ssl = True
     return client
 
 
@@ -46,6 +52,33 @@ def mock_data() -> MagicMock:
     data.process_response = AsyncMock(return_value=InferenceInfo(request_metrics=RequestMetrics(text=Text(input_tokens=0))))
     data.to_request_body = AsyncMock(return_value={"mock": "data"})
     return data
+
+
+def test_connector_ssl_defaults_to_verification() -> None:
+    assert _connector_ssl(verify_ssl=True, ca_cert_path=None, cert_path=None, key_path=None) is True
+
+
+def test_connector_ssl_can_skip_verification() -> None:
+    assert _connector_ssl(verify_ssl=False, ca_cert_path=None, cert_path=None, key_path=None) is False
+
+
+def test_connector_ssl_loads_custom_ca() -> None:
+    with patch("inference_perf.client.modelserver.openai_client.ssl.create_default_context") as mock_create:
+        ctx = MagicMock()
+        mock_create.return_value = ctx
+        result = _connector_ssl(verify_ssl=True, ca_cert_path="/tmp/ca.pem", cert_path=None, key_path=None)
+        ctx.load_verify_locations.assert_called_once_with(cafile="/tmp/ca.pem")
+        assert result is ctx
+
+
+def test_connector_ssl_skips_verify_with_client_cert() -> None:
+    with patch("inference_perf.client.modelserver.openai_client.ssl.create_default_context") as mock_create:
+        ctx = MagicMock()
+        mock_create.return_value = ctx
+        result = _connector_ssl(verify_ssl=False, ca_cert_path=None, cert_path="/tmp/client.pem", key_path="/tmp/client.key")
+        assert ctx.check_hostname is False
+        ctx.load_cert_chain.assert_called_once_with(certfile="/tmp/client.pem", keyfile="/tmp/client.key")
+        assert result is ctx
 
 
 @pytest.mark.asyncio

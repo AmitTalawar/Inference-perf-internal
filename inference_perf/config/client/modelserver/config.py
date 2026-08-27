@@ -38,3 +38,11 @@ class ModelServerClientConfig(StrictBaseModel):
     api_key: Optional[str] = Field(default=None, description="API key sent as a bearer token with each request.")
     cert_path: Optional[str] = Field(default=None, description="Path to a client TLS certificate file.")
     key_path: Optional[str] = Field(default=None, description="Path to the private key for the client TLS certificate.")
+    ca_cert_path: Optional[str] = Field(
+        default=None,
+        description="Path to a CA certificate file to trust when verifying the server TLS certificate.",
+    )
+    verify_ssl: bool = Field(
+        default=True,
+        description="Verify the server TLS certificate. Set to false for self-signed certificates.",
+    )

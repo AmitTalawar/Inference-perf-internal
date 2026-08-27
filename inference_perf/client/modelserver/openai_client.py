@@ -29,7 +29,7 @@ from inference_perf.utils import CustomTokenizer
 from .base import ModelServerClient, ModelServerClientSession
 from .metrics import Metric, BaseMetrics
 from .otel_instrumentation import get_otel_instrumentation
-from typing import Iterator, List, Optional, Any, Dict, Tuple
+from typing import Iterator, List, Optional, Any, Dict, Tuple, Union
 import aiohttp
 import asyncio
 import json
@@ -90,6 +90,8 @@ class openAIModelServerClient(ModelServerClient):
         timeout: Optional[float] = None,
         cert_path: Optional[str] = None,
         key_path: Optional[str] = None,
+        ca_cert_path: Optional[str] = None,
+        verify_ssl: bool = True,
         lora_config: Optional[List[MultiLoRAConfig]] = None,
     ) -> None:
         super().__init__(api_config, timeout)
@@ -102,7 +104,14 @@ class openAIModelServerClient(ModelServerClient):
         self.api_key = api_key
         self.cert_path = cert_path
         self.key_path = key_path
+        self.ca_cert_path = ca_cert_path
+        self.verify_ssl = verify_ssl
         self.lora_config = lora_config
+        if not verify_ssl:
+            logger.warning(
+                "TLS certificate verification is disabled (server.verify_ssl=false). "
+                "Do not use this against untrusted networks."
+            )
 
         # Initialize OTEL instrumentation (configured via environment variables)
         self.otel = get_otel_instrumentation()
@@ -175,7 +184,15 @@ class openAIModelServerClient(ModelServerClient):
 
     def get_supported_models(self) -> List[dict[str, Any]]:
         try:
-            response = requests.get(f"{self.uri}/v1/models")
+            verify: Union[bool, str]
+            if not self.verify_ssl:
+                verify = False
+            elif self.ca_cert_path:
+                verify = self.ca_cert_path
+            else:
+                verify = True
+            cert = (self.cert_path, self.key_path) if self.cert_path and self.key_path else None
+            response = requests.get(f"{self.uri}/v1/models", verify=verify, cert=cert)
             response.raise_for_status()
             data = response.json()
             if "data" in data and isinstance(data["data"], list):
@@ -185,6 +202,31 @@ class openAIModelServerClient(ModelServerClient):
         except Exception as e:
             logger.error(f"Got exception retrieving supported models {e}")
             return []
+
+
+def _connector_ssl(
+    verify_ssl: bool,
+    ca_cert_path: Optional[str],
+    cert_path: Optional[str],
+    key_path: Optional[str],
+) -> Union[ssl.SSLContext, bool]:
+    """SSL argument for aiohttp.TCPConnector: True/False or a custom context."""
+    has_client_cert = bool(cert_path and key_path)
+    if not verify_ssl and not has_client_cert:
+        return False
+    if verify_ssl and not has_client_cert and not ca_cert_path:
+        return True
+
+    ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    if not verify_ssl:
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+    elif ca_cert_path:
+        ssl_context.load_verify_locations(cafile=ca_cert_path)
+    if has_client_cert:
+        assert cert_path is not None and key_path is not None
+        ssl_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+    return ssl_context
 
 
 def _update_headers_case_insensitive(target: dict[str, str], source: dict[str, str]) -> None:
@@ -201,13 +243,15 @@ class openAIModelServerClientSession(ModelServerClientSession):
 
     def __init__(self, client: openAIModelServerClient):
         timeout = aiohttp.ClientTimeout(total=client.timeout) if client.timeout else aiohttp.helpers.sentinel
-        connector = None
-        if client.cert_path and client.key_path:
-            ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)  # Use system trust store
-            ssl_context.load_cert_chain(certfile=client.cert_path, keyfile=client.key_path)
-            connector = aiohttp.TCPConnector(limit=client.max_tcp_connections, ssl=ssl_context)
-        else:
-            connector = aiohttp.TCPConnector(limit=client.max_tcp_connections)
+        connector = aiohttp.TCPConnector(
+            limit=client.max_tcp_connections,
+            ssl=_connector_ssl(
+                verify_ssl=client.verify_ssl,
+                ca_cert_path=client.ca_cert_path,
+                cert_path=client.cert_path,
+                key_path=client.key_path,
+            ),
+        )
 
         self.client = client
         self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)

@@ -35,6 +35,10 @@ class TGImodelServerClient(openAIModelServerClient):
         ignore_eos: bool = True,
         api_key: Optional[str] = None,
         timeout: Optional[float] = None,
+        cert_path: Optional[str] = None,
+        key_path: Optional[str] = None,
+        ca_cert_path: Optional[str] = None,
+        verify_ssl: bool = True,
         lora_config: Optional[List[MultiLoRAConfig]] = None,
     ) -> None:
         super().__init__(
@@ -48,6 +52,10 @@ class TGImodelServerClient(openAIModelServerClient):
             ignore_eos,
             api_key,
             timeout,
+            cert_path=cert_path,
+            key_path=key_path,
+            ca_cert_path=ca_cert_path,
+            verify_ssl=verify_ssl,
             lora_config=lora_config,
         )
         self.metric_filters = additional_filters
