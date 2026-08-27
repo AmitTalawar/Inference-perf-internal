@@ -517,6 +517,13 @@ class ChatCompletionAPIData(InferenceAPIData):
                         }
                     )
             payload["tools"] = tools
+        if messages and messages[-1].get("role") == "assistant":
+            # HF/vLLM chat templates default add_generation_prompt=True, which is
+            # invalid when the prompt already ends on an assistant turn. Weka
+            # multi-turn reconstruction does that when the next request's prompt is
+            # previous prompt + previous completion with no new user tokens.
+            payload["add_generation_prompt"] = False
+            payload["continue_final_message"] = True
         return payload
 
     def _count_prompt_tokens(self, tokenizer: CustomTokenizer) -> int:

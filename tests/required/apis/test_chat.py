@@ -46,6 +46,20 @@ async def test_chat_completion_api_data() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_chat_completion_continues_trailing_assistant_message() -> None:
+    data = ChatCompletionAPIData(
+        messages=[
+            ChatMessage(role="user", content="Hello"),
+            ChatMessage(role="assistant", content="Hi"),
+        ]
+    )
+    body = await data.to_request_body("test-model", 100, False, True)
+    assert body["messages"][-1]["role"] == "assistant"
+    assert body["add_generation_prompt"] is False
+    assert body["continue_final_message"] is True
+
+
 def test_count_prompt_tokens_includes_prefix_text() -> None:
     """``_count_prompt_tokens`` sums prefix_text tokens alongside message
     tokens — the total reflects the actual prompt sent to the model."""
