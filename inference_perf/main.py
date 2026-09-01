@@ -367,11 +367,23 @@ def main_cli() -> None:
             datagen = VisionArenaDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.OTelTraceReplay:
             datagen = OTelTraceReplayDataGenerator(
-                config.api, config.data, tokenizer, mp_manager, config.load.base_seed, num_workers=config.load.num_workers
+                config.api,
+                config.data,
+                tokenizer,
+                mp_manager,
+                config.load.base_seed,
+                num_workers=config.load.num_workers,
+                request_timeout=config.load.request_timeout,
             )
         elif config.data.type == DataGenType.WekaTraceReplay:
             datagen = WekaTraceReplayDataGenerator(
-                config.api, config.data, tokenizer, mp_manager, config.load.base_seed, num_workers=config.load.num_workers
+                config.api,
+                config.data,
+                tokenizer,
+                mp_manager,
+                config.load.base_seed,
+                num_workers=config.load.num_workers,
+                request_timeout=config.load.request_timeout,
             )
         else:
             datagen = MockDataGenerator(config.api, config.data, tokenizer)

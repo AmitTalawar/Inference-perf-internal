@@ -341,7 +341,7 @@ class EventOutputRegistry:
     def is_event_failed(self, event_id: str) -> bool:
         return event_id in self._failed_event_ids
 
-    async def require_async(self, event_id: str, timeout_sec: float = 3600.0) -> str:
+    async def require_async(self, event_id: str, timeout_sec: Optional[float] = None) -> str:
         if event_id in self._failed_event_ids:
             raise EventFailedError(event_id)
 
@@ -361,8 +361,10 @@ class EventOutputRegistry:
 
         logger.debug(f"Event {event_id} waiting on asyncio signal (zero threads)")
 
+        # None means wait indefinitely (matches aiohttp when request_timeout is unset/very large).
+        wait_timeout = timeout_sec if timeout_sec is not None and timeout_sec > 0 else None
         try:
-            await asyncio.wait_for(signal.wait(), timeout=timeout_sec)
+            await asyncio.wait_for(signal.wait(), timeout=wait_timeout)
         except asyncio.TimeoutError as e:
             raise TimeoutError(
                 f"EventOutputRegistry: output for '{event_id}' not available after "
@@ -535,10 +537,21 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             return
 
         if self.predecessor_event_ids:
-            logger.debug(f"Event {self.event_id} waiting for {len(self.predecessor_event_ids)} predecessor(s)")
+            # Prefer load.request_timeout from the YAML (seconds). Falls back to no
+            # timeout when unset so long multi-turn sessions are not cancelled mid-DAG.
+            timeout_sec: Optional[float] = None
+            if self.generator is not None:
+                timeout_sec = getattr(self.generator, "request_timeout", None)
+            logger.debug(
+                f"Event {self.event_id} waiting for {len(self.predecessor_event_ids)} "
+                f"predecessor(s) (timeout_sec={timeout_sec})"
+            )
             try:
                 await asyncio.gather(
-                    *[self.registry.require_async(event_id, timeout_sec=3600.0) for event_id in self.predecessor_event_ids]
+                    *[
+                        self.registry.require_async(event_id, timeout_sec=timeout_sec)
+                        for event_id in self.predecessor_event_ids
+                    ]
                 )
             except EventFailedError:
                 self._fail_and_notify(session_id, "predecessor failed")
@@ -1289,6 +1302,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         base_seed: Optional[int] = None,
         num_workers: int = 1,
         replay_config: Optional[SessionReplayConfig] = None,
+        request_timeout: Optional[float] = None,
     ) -> None:
         super().__init__(api_config, config, tokenizer)
         self.config = config
@@ -1296,6 +1310,9 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         self.mp_manager = mp_manager
         self.num_workers = max(1, num_workers)
         self.base_seed = base_seed if base_seed is not None else 42
+        # Predecessor-wait budget for session DAGs. Sourced from load.request_timeout
+        # (seconds). None / <=0 means wait indefinitely.
+        self.request_timeout = request_timeout
 
         self.output_registry = EventOutputRegistry()
         self.worker_tracker = WorkerSessionTracker()

@@ -190,6 +190,7 @@ tests/optional/**/output/
 #trace data
 data/
 logs/
+benchmarks/
 
 #config files
 weka-modified.yaml

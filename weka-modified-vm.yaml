@@ -1,0 +1,48 @@
+load:
+  type: trace_session_replay
+  stages:
+    - concurrent_sessions: 20
+      num_sessions: 40
+  num_workers: 64
+  worker_max_concurrency: 20000
+  request_timeout: 3000000
+  base_seed: 1787548644060
+api:
+  type: chat
+  streaming: true
+server:
+  type: vllm
+  model_name: poolside/Laguna-XS-2.1
+  base_url: http://localhost:8000
+tokenizer:
+  pretrained_model_name_or_path: poolside/Laguna-XS-2.1
+data:
+  type: weka_trace_replay
+  weka_trace_replay:
+    #hf_dataset_path: "semianalysisai/cc-traces-weka-with-subagents-060826-256k"
+    #trace_directory: "/home/amit/dev/offloading/traces/inference-perf/data/traces"
+    #trace_directory: "/home/amit/dev/offloading/traces/inference-perf/data/merged_with_headers"
+    trace_files:                                  # List of specific trace files
+      - "/home/amit/dev/offloading/traces/inference-perf/data/merged_with_headers/trace.with_headers.jsonl"
+    num_dataset_entries: 40
+    duplicate_sessions_target: 40
+    compiled_store_path: "/home/amit/dev/offloading/traces/inference-perf/data/compile_artifacts"
+    compile_parallelism_mode: "process"
+    compile_workers: 64
+    compile_inflight_limit: 64
+    #compile_chunk_size: 64
+    #compile_timing_jsonl_path: "/home/amit/dev/offloading/traces/inference-perf/logs/weka_compile_timing_sequential.jsonl"
+    use_static_model: true
+    static_model_name: "poolside/Laguna-XS-2.1"
+    default_block_size: 64
+    skip_invalid_files: true
+    clamp_substituted_output_to_recorded: true
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: true
+  goodput:
+    constraints:
+      ttft: 0.3
+      itl: 0.018
