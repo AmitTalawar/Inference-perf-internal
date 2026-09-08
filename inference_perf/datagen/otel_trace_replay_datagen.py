@@ -342,6 +342,7 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         mp_manager: Optional[SyncManager] = None,
         base_seed: Optional[int] = None,
         num_workers: int = 1,
+        request_timeout: Optional[float] = None,
     ) -> None:
         if not hasattr(config, "otel_trace_replay") or config.otel_trace_replay is None:
             raise ValueError("otel_trace_replay configuration is required for OTelTraceReplayDataGenerator")
@@ -357,6 +358,7 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             base_seed=base_seed,
             num_workers=num_workers,
             replay_config=self.otel_config,
+            request_timeout=request_timeout,
         )
 
         self.mp_manager = mp_manager
