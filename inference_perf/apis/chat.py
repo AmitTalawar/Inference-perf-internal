@@ -479,6 +479,14 @@ class ChatCompletionAPIData(InferenceAPIData):
         else:
             messages = [m.to_dict() for m in self.messages]
 
+        if messages and not any(m.get("role") in ("user", "system") for m in messages):
+            # vLLM/HF chat templates reject a conversation with no user/system turn.
+            # Weka reconstruction can emit a lone assistant message after an LCP-0
+            # context reset when prev_out covers every new hash block. Keep the
+            # assistant text and continue it; a newline user stub is enough to
+            # satisfy the template (empty content is often dropped).
+            messages.insert(0, {"role": "user", "content": "\n"})
+
         payload: Dict[str, Any] = {
             "model": effective_model_name,
             "messages": messages,

@@ -60,6 +60,32 @@ async def test_chat_completion_continues_trailing_assistant_message() -> None:
     assert body["continue_final_message"] is True
 
 
+@pytest.mark.asyncio
+async def test_chat_completion_prepends_user_when_only_assistant() -> None:
+    """A lone assistant message is valid Weka reconstruction after a full
+    prefix miss, but the chat template still requires a user/system start."""
+    data = ChatCompletionAPIData(messages=[ChatMessage(role="assistant", content="continued")])
+    body = await data.to_request_body("test-model", 100, False, True)
+    assert [m["role"] for m in body["messages"]] == ["user", "assistant"]
+    assert body["messages"][0]["content"] == "\n"
+    assert body["messages"][1]["content"] == "continued"
+    assert body["add_generation_prompt"] is False
+    assert body["continue_final_message"] is True
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_does_not_prepend_user_when_user_present() -> None:
+    data = ChatCompletionAPIData(
+        messages=[
+            ChatMessage(role="assistant", content="prior"),
+            ChatMessage(role="user", content="next"),
+        ]
+    )
+    body = await data.to_request_body("test-model", 100, False, False)
+    assert [m["role"] for m in body["messages"]] == ["assistant", "user"]
+    assert "add_generation_prompt" not in body
+
+
 def test_count_prompt_tokens_includes_prefix_text() -> None:
     """``_count_prompt_tokens`` sums prefix_text tokens alongside message
     tokens — the total reflects the actual prompt sent to the model."""

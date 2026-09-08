@@ -182,6 +182,29 @@ def test_conversation_reconstructor_turn_can_end_on_assistant() -> None:
     assert [m["role"] for m in msgs] == ["user", "assistant"]
 
 
+def test_conversation_reconstructor_lcp_zero_can_be_assistant_only() -> None:
+    """A full prefix miss (LCP=0) plus prev_out covering every new block
+    yields a lone assistant prompt. ChatCompletionAPIData prepends a user stub."""
+    recon = ConversationReconstructor(
+        block_size=1,
+        decode_block_tokens=lambda ids: list(ids),
+        sample_partial_tail_tokens=lambda n, seed: list(range(n)),
+        decode_tokens_to_text=lambda tokens: ",".join(str(t) for t in tokens),
+    )
+    recon.init_turn_0(hash_ids=[1, 2, 3], in_tokens=3, tool_tokens=0, system_tokens=0, seed="seed0")
+    recon.advance_turn(
+        prev_hash_ids=[1, 2, 3],
+        prev_in_tokens=3,
+        prev_out_tokens=2,
+        curr_hash_ids=[10, 11],
+        curr_in_tokens=2,
+        seed="seed1",
+    )
+    msgs = recon.snapshot_messages()
+    assert [m["role"] for m in msgs] == ["assistant"]
+    assert msgs[0]["content"] == "10,11"
+
+
 def test_weka_trace_replay_generator_mock(tmp_path: Path) -> None:
     # Create a mock Weka Trace file
     trace_data = {
