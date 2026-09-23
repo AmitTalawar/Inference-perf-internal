@@ -162,6 +162,58 @@ def test_identity_mismatch_message() -> None:
         stored.check_against(current)
 
 
+def test_identity_from_dict_defaults_fanout_off() -> None:
+    """Pre-fan-out manifests omit fan-out keys; defaults keep flag-off runs matching."""
+    identity = CompileIdentity.from_dict(
+        {
+            "tokenizer_name_or_path": "tok",
+            "corpus_path": "/c",
+            "corpus_byte_size": 1,
+            "base_seed": 1,
+            "default_block_size": 64,
+            "trace_idle_gap_cap_seconds": 60.0,
+        }
+    )
+    assert identity.parallelize_sibling_subagents is False
+    assert identity.max_parallel_subagents == 0
+    current = CompileIdentity(
+        tokenizer_name_or_path="tok",
+        corpus_path="/c",
+        corpus_byte_size=1,
+        base_seed=1,
+        default_block_size=64,
+        trace_idle_gap_cap_seconds=60.0,
+        parallelize_sibling_subagents=False,
+        max_parallel_subagents=0,
+    )
+    identity.check_against(current)
+
+
+def test_identity_mismatch_on_fanout_enable_mentions_repath() -> None:
+    stored = CompileIdentity(
+        tokenizer_name_or_path="tok",
+        corpus_path="/c",
+        corpus_byte_size=1,
+        base_seed=1,
+        default_block_size=64,
+        trace_idle_gap_cap_seconds=60.0,
+        parallelize_sibling_subagents=False,
+        max_parallel_subagents=0,
+    )
+    current = CompileIdentity(
+        tokenizer_name_or_path="tok",
+        corpus_path="/c",
+        corpus_byte_size=1,
+        base_seed=1,
+        default_block_size=64,
+        trace_idle_gap_cap_seconds=60.0,
+        parallelize_sibling_subagents=True,
+        max_parallel_subagents=8,
+    )
+    with pytest.raises(CompileIdentityMismatchError, match="Fan-out identity changed"):
+        stored.check_against(current)
+
+
 def test_store_atomic_manifest_and_session_files(tmp_path: Path) -> None:
     identity = CompileIdentity(
         tokenizer_name_or_path="mock-tokenizer",

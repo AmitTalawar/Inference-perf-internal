@@ -178,6 +178,9 @@ Any extra keys in the dict are passed as kwargs to datasets.load_dataset(). |
 | `--data.weka_trace_replay.compile_inflight_limit` | int | Maximum number of traces kept in-flight concurrently during process-based Weka compile scheduling. When unset, compile_chunk_size is used as a backward-compatible fallback. |
 | `--data.weka_trace_replay.compile_timing_jsonl_path` | str | Optional path to write compile-stage timing events as JSONL. When unset, compile timing events are not persisted. |
 | `--data.weka_trace_replay.compiled_store_path` | str | Directory for the Weka compiled-session cache. When set, ReplayGraphs (including __dupseed duplicates) are written through on miss and reused on hit. Write-through is always on when this path is set. Raw trace sources remain required in config and are used on cache miss/fill. |
+| `--data.weka_trace_replay.parallelize_sibling_subagents` | boolean | Collapse parent-bracketed sibling subagent waves so first turns start together (default false). Part of compiled-store identity. |
+| `--data.weka_trace_replay.max_parallel_subagents` | int | Max siblings starting together per wave batch when fan-out is on (default 8). 0 = whole wave. |
+| `--data.weka_trace_replay.max_inflight_requests` | int | Optional hard ceiling on concurrent live HTTP after predecessor wait. |
 | `--data.conversation_replay.seed` | int | Random seed for deterministic generation |
 | `--data.conversation_replay.num_conversations` | int | Number of conversation blueprints to generate |
 | `--data.conversation_replay.shared_system_prompt_len` | int | Fixed shared system prompt length in tokens |

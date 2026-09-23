@@ -25,6 +25,12 @@ from inference_perf.datagen.weka_trace_replay_datagen import (
     longest_common_prefix,
     truncate_synth_buf_at_block,
     _IdleGapTimeWarp,
+    WekaNormalRequest,
+    WekaStreamingRequest,
+    WekaSubagentEntry,
+    parent_bracketed_subagent_waves,
+    parallelize_sibling_subagent_requests,
+    _sa_end_seconds,
 )
 
 
@@ -203,6 +209,105 @@ def test_conversation_reconstructor_lcp_zero_can_be_assistant_only() -> None:
     msgs = recon.snapshot_messages()
     assert [m["role"] for m in msgs] == ["assistant"]
     assert msgs[0]["content"] == "10,11"
+
+
+def _make_sa(agent_id: str, t: float, duration_ms: int, nested: list[tuple[float, float]]) -> WekaSubagentEntry:
+    reqs = [
+        WekaNormalRequest.model_validate(
+            {"t": nt, "type": "n", "model": "m", "in": 10, "out": 2, "hash_ids": [1, 2], "api_time": api}
+        )
+        for nt, api in nested
+    ]
+    return WekaSubagentEntry(
+        t=t,
+        type="subagent",
+        agent_id=agent_id,
+        subagent_type="Subagent",
+        duration_ms=duration_ms,
+        requests=reqs,
+    )
+
+
+def test_parent_bracketed_subagent_waves_splits_on_parent() -> None:
+    """Like line 2 of the Weka corpus: two SA waves separated by a parent turn."""
+    parent = WekaStreamingRequest.model_validate(
+        {"t": 0.0, "type": "s", "model": "m", "in": 10, "out": 2, "hash_ids": [0], "api_time": 1.0}
+    )
+    mid_parent = WekaStreamingRequest.model_validate(
+        {"t": 50.0, "type": "s", "model": "m", "in": 20, "out": 2, "hash_ids": [0, 1], "api_time": 1.0}
+    )
+    requests = [
+        parent,
+        _make_sa("a", 1.0, 1000, [(1.0, 0.5)]),
+        _make_sa("b", 2.0, 1000, [(2.0, 0.5)]),
+        mid_parent,
+        _make_sa("c", 51.0, 1000, [(51.0, 0.5)]),
+        _make_sa("d", 52.0, 1000, [(52.0, 0.5)]),
+        _make_sa("e", 53.0, 1000, [(53.0, 0.5)]),
+    ]
+    waves = parent_bracketed_subagent_waves(requests)
+    assert waves == [[1, 2], [4, 5, 6]]
+
+
+def test_parallelize_sibling_subagents_collapses_wave_starts() -> None:
+    """Three abutting SAs share one start; nested second turns stay after first."""
+    requests = [
+        WekaStreamingRequest.model_validate(
+            {"t": 0.0, "type": "s", "model": "m", "in": 10, "out": 2, "hash_ids": [0], "api_time": 10.0}
+        ),
+        _make_sa("sa1", 10.0, 5000, [(10.0, 1.0), (12.0, 3.0)]),
+        _make_sa("sa2", 15.0, 4000, [(15.0, 1.0), (17.0, 2.0)]),
+        _make_sa("sa3", 19.0, 5000, [(19.0, 1.0), (21.0, 3.0)]),
+        WekaStreamingRequest.model_validate(
+            {"t": 30.0, "type": "s", "model": "m", "in": 20, "out": 2, "hash_ids": [0, 1], "api_time": 1.0}
+        ),
+    ]
+    out = parallelize_sibling_subagent_requests(requests, max_parallel_subagents=8)
+    sa1, sa2, sa3 = out[1], out[2], out[3]
+    assert isinstance(sa1, WekaSubagentEntry) and isinstance(sa2, WekaSubagentEntry) and isinstance(sa3, WekaSubagentEntry)
+    assert sa1.t == sa2.t == sa3.t == 10.0
+    assert sa1.requests[0].t == 10.0
+    assert sa1.requests[1].t == 12.0  # internal gap preserved
+    assert sa2.requests[0].t == 10.0
+    assert sa2.requests[1].t == 12.0
+    assert _sa_end_seconds(sa1) == 15.0
+    assert out[4].t == 30.0  # following parent unchanged
+
+
+def test_parallelize_sibling_subagents_batches_when_capped() -> None:
+    """Wave of 10 with max_parallel=3 -> 4 batches; batch i+1 starts at prior batch end."""
+    parent = WekaStreamingRequest.model_validate(
+        {"t": 0.0, "type": "s", "model": "m", "in": 10, "out": 2, "hash_ids": [0], "api_time": 1.0}
+    )
+    sas = []
+    t = 1.0
+    for i in range(10):
+        # 1s duration each, abutting serial
+        sas.append(_make_sa(f"sa{i}", t, 1000, [(t, 1.0)]))
+        t += 1.0
+    requests = [parent, *sas]
+    out = parallelize_sibling_subagent_requests(requests, max_parallel_subagents=3)
+    starts = [out[i].t for i in range(1, 11)]
+    # batch0: idxs 0-2 start at 1.0, end at 2.0
+    assert starts[0:3] == [1.0, 1.0, 1.0]
+    # batch1 starts at 2.0
+    assert starts[3:6] == [2.0, 2.0, 2.0]
+    assert starts[6:9] == [3.0, 3.0, 3.0]
+    assert starts[9] == 4.0
+
+
+def test_parallelize_sibling_subagents_noop_when_singleton_waves() -> None:
+    requests = [
+        WekaStreamingRequest.model_validate(
+            {"t": 0.0, "type": "s", "model": "m", "in": 10, "out": 2, "hash_ids": [0], "api_time": 1.0}
+        ),
+        _make_sa("only", 1.0, 1000, [(1.0, 0.5)]),
+        WekaStreamingRequest.model_validate(
+            {"t": 5.0, "type": "s", "model": "m", "in": 20, "out": 2, "hash_ids": [0, 1], "api_time": 1.0}
+        ),
+    ]
+    out = parallelize_sibling_subagent_requests(requests, max_parallel_subagents=8)
+    assert out[1].t == 1.0
 
 
 def test_weka_trace_replay_generator_mock(tmp_path: Path) -> None:

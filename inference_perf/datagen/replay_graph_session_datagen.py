@@ -419,6 +419,8 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
     # When True, truncate live substituted assistant content to the recorded
     # slot's character length so next-turn prompts stay near compiled size.
     clamp_substituted_output_to_recorded: bool = False
+    # Optional cross-worker/process semaphore for max_inflight_requests.
+    inflight_semaphore: Any = None
     # Set by _build_messages_with_substitution when it calls record_failure
     # early (e.g. recorded fallback also malformed). Lets the caller pass the
     # right reason string to _fail_and_notify instead of a generic fallback.
@@ -1320,6 +1322,9 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             self.session_completion_queue: Any = mp_manager.Queue()
         else:
             self.session_completion_queue = None
+        # Optional hard ceiling on concurrent live HTTP (Weka max_inflight_requests).
+        # Set by subclass after init when configured.
+        self.inflight_semaphore: Any = None
 
         self.sessions: List[Optional[ReplaySession]] = []
         self._session_ids: List[str] = []
@@ -1863,6 +1868,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
                 if self.replay_config
                 else False
             ),
+            inflight_semaphore=getattr(self, "inflight_semaphore", None),
             # Back-reference so the event can evict this session from the worker once drained.
             generator=self,
         )

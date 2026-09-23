@@ -663,7 +663,7 @@ Stage extras shared with OTel (`session_rate`, `timeout`) apply here too.
 
 | Key | What it does |
 |-----|----------------|
-| `compiled_store_path` | Directory for compiled `ReplayGraph` cache. Write-through on miss. Full hit (`stored >= duplicate_sessions_target`) skips corpus tokenization and raw trace load. Identity mismatch (tokenizer name, corpus path/size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`) fails the run. Model name is not part of identity. |
+| `compiled_store_path` | Directory for compiled `ReplayGraph` cache. Write-through on miss. Full hit (`stored >= duplicate_sessions_target`) skips corpus tokenization and raw trace load. Identity mismatch (tokenizer name, corpus path/size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`, `parallelize_sibling_subagents`, `max_parallel_subagents`) fails the run. Model name is not part of identity. When enabling sibling fan-out against an existing store, delete or repath the store so graphs rebuild. |
 
 **Compile parallelism:**
 
@@ -674,6 +674,14 @@ Stage extras shared with OTel (`session_rate`, `timeout`) apply here too.
 | `compile_inflight_limit` | Max traces compiling at once (refill as they finish). If unset, `compile_chunk_size` is the fallback. |
 | `compile_chunk_size` | Legacy batch/inflight fallback (default `1`). Prefer `compile_inflight_limit`. |
 | `compile_timing_jsonl_path` | Optional JSONL of compile-phase timings. Unset = no timing file. |
+
+**Sibling subagent fan-out (opt-in):**
+
+| Key | What it does |
+|-----|----------------|
+| `parallelize_sibling_subagents` | When `true`, collapse parent-bracketed sibling `type: subagent` waves so their first turns start together (default `false`). Part of compiled-store identity. |
+| `max_parallel_subagents` | Max siblings starting together in one wave batch (default `8`). `0` = whole wave. Unused / identity records `0` when fan-out is off. |
+| `max_inflight_requests` | Optional hard ceiling on concurrent live HTTP after predecessor wait. Cross-worker via the multiprocessing manager. When unset, peak in-flight can approach `concurrent_sessions × max_parallel_subagents`. |
 
 **Model and reconstruction:**
 

@@ -56,6 +56,7 @@ hashes recorded in the trace.
 
 from dataclasses import dataclass
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+import asyncio
 import hashlib
 import json
 import logging
@@ -65,7 +66,7 @@ from pathlib import Path
 import random
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Annotated, Set
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Annotated, Set, cast
 from multiprocessing.managers import SyncManager
 
 from huggingface_hub import hf_hub_download
@@ -509,6 +510,71 @@ def _subagent_request_absolute_t(entry: WekaSubagentEntry, req: WekaNormalReques
     return req.t
 
 
+def parent_bracketed_subagent_waves(requests: List[WekaRequest]) -> List[List[int]]:
+    """Indices of consecutive subagent entries between parent (n/s) turns."""
+    waves: List[List[int]] = []
+    current: List[int] = []
+    for idx, req in enumerate(requests):
+        if isinstance(req, WekaSubagentEntry):
+            current.append(idx)
+        else:
+            if current:
+                waves.append(current)
+                current = []
+    if current:
+        waves.append(current)
+    return waves
+
+
+def _shift_subagent_entry(entry: WekaSubagentEntry, delta: float) -> WekaSubagentEntry:
+    """Shift a subagent window by delta seconds; keep relative nested times relative."""
+    if abs(delta) < 1e-12:
+        return entry
+    new_requests: List[WekaNormalRequest] = []
+    for req in entry.requests:
+        if req.t + 1e-6 < entry.t:
+            new_requests.append(req)
+        else:
+            new_requests.append(req.model_copy(update={"t": req.t + delta}))
+    return entry.model_copy(update={"t": entry.t + delta, "requests": new_requests})
+
+
+def parallelize_sibling_subagent_requests(
+    requests: List[WekaRequest],
+    *,
+    max_parallel_subagents: int,
+) -> List[WekaRequest]:
+    """Collapse parent-bracketed sibling subagent starts into concurrent batches.
+
+    ``max_parallel_subagents`` of 0 means the whole wave starts together.
+    Intra-subagent nested turns stay serial; only each subagent's absolute start
+    (and absolute nested request times) move.
+    """
+    waves = parent_bracketed_subagent_waves(requests)
+    if not any(len(wave) >= 2 for wave in waves):
+        return requests
+
+    out: List[WekaRequest] = list(requests)
+    batch_size = len(requests) if max_parallel_subagents <= 0 else max_parallel_subagents
+
+    for wave_idxs in waves:
+        if len(wave_idxs) < 2:
+            continue
+        next_batch_start: Optional[float] = None
+        for batch_begin in range(0, len(wave_idxs), batch_size):
+            batch = wave_idxs[batch_begin : batch_begin + batch_size]
+            entries = [out[i] for i in batch]
+            if next_batch_start is None:
+                target = min(cast(WekaSubagentEntry, e).t for e in entries)
+            else:
+                target = next_batch_start
+            for idx, entry in zip(batch, entries):
+                sa = cast(WekaSubagentEntry, entry)
+                out[idx] = _shift_subagent_entry(sa, target - sa.t)
+            next_batch_start = max(_sa_end_seconds(cast(WekaSubagentEntry, out[i])) for i in batch)
+    return out
+
+
 def _pack_into_streams(requests: List[WekaNormalRequest]) -> List[List[WekaNormalRequest]]:
     sorted_reqs = sorted(requests, key=lambda r: r.t)
     streams: List[List[WekaNormalRequest]] = []
@@ -607,6 +673,8 @@ def _reconstruct_raw_calls_shared(
     use_static_model: bool,
     static_model_name: str,
     model_mapping: Optional[Dict[str, str]],
+    parallelize_sibling_subagents: bool = False,
+    max_parallel_subagents: int = 8,
 ) -> List[RawCall]:
     cache: Dict[int, List[int]] = {}
     hash_id_rng = HashIdRandomGenerator(base_seed)
@@ -616,9 +684,15 @@ def _reconstruct_raw_calls_shared(
     configured = model_mapping or {}
     model_map = {m: static_model_name for m in trace.models} if use_static_model else configured
 
+    requests = list(trace.requests)
+    if parallelize_sibling_subagents:
+        requests = parallelize_sibling_subagent_requests(
+            requests, max_parallel_subagents=max_parallel_subagents
+        )
+
     normals: List[Tuple[int, Union[WekaNormalRequest, WekaStreamingRequest]]] = []
     subagents: List[Tuple[int, WekaSubagentEntry]] = []
-    for idx, req in enumerate(trace.requests):
+    for idx, req in enumerate(requests):
         if isinstance(req, WekaNormalRequest | WekaStreamingRequest):
             normals.append((idx, req))
         elif isinstance(req, WekaSubagentEntry):
@@ -656,8 +730,14 @@ def _reconstruct_raw_calls_shared(
         for h in hash_ids:
             cached = cache.get(h)
             if cached is None:
-                hash_id_rng.reseed_for_hash_id(h)
-                start = hash_id_rng.randrange(corpus_size)
+                if h < 0:
+                    stable_rng = HashIdRandomGenerator(base_seed)
+                    stable_rng.set_trace_id("GLOBAL_SYNTHETIC")
+                    stable_rng.reseed_for_hash_id(h)
+                    start = stable_rng.randrange(corpus_size)
+                else:
+                    hash_id_rng.reseed_for_hash_id(h)
+                    start = hash_id_rng.randrange(corpus_size)
                 end = start + trace_bs
                 cached = tokenized_corpus[start:end]
                 if end > corpus_size:
@@ -851,6 +931,8 @@ def _build_trace_session_in_process(
     static_model_name: str,
     model_mapping: Optional[Dict[str, str]],
     tokenizer_name_or_path: str,
+    parallelize_sibling_subagents: bool = False,
+    max_parallel_subagents: int = 8,
 ) -> Tuple[Optional[ReplaySession], Dict[str, Any]]:
     t_total_start = time.perf_counter()
     t_tok_start = time.perf_counter()
@@ -876,6 +958,8 @@ def _build_trace_session_in_process(
         use_static_model=use_static_model,
         static_model_name=static_model_name,
         model_mapping=model_mapping,
+        parallelize_sibling_subagents=parallelize_sibling_subagents,
+        max_parallel_subagents=max_parallel_subagents,
     )
     reconstruct_raw_calls_ms = int((time.perf_counter() - t_reconstruct_start) * 1000)
     if not raw_calls:
@@ -959,6 +1043,35 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         self._compile_timing_jsonl_path: Optional[Path] = (
             Path(self.weka_config.compile_timing_jsonl_path) if self.weka_config.compile_timing_jsonl_path else None
         )
+
+        # Optional cross-worker ceiling on live HTTP after predecessor wait.
+        self.inflight_semaphore: Any = None
+        max_inflight = self.weka_config.max_inflight_requests
+        if max_inflight is not None:
+            if mp_manager is not None:
+                self.inflight_semaphore = mp_manager.Semaphore(max_inflight)
+            else:
+                # Single-process / in-proc workers: asyncio.Semaphore on this generator.
+                self.inflight_semaphore = asyncio.Semaphore(max_inflight)
+
+        if self.weka_config.parallelize_sibling_subagents:
+            max_par = self.weka_config.max_parallel_subagents
+            peak_hint = "unlimited" if max_par <= 0 else f"concurrent_sessions × {max_par}"
+            logger.info(
+                "Weka sibling fan-out enabled: max_parallel_subagents=%s max_inflight_requests=%s; "
+                "expected peak in-flight hint ≈ %s (sessions and fan-out multiply unless max_inflight_requests caps HTTP)",
+                max_par,
+                max_inflight,
+                peak_hint,
+            )
+            if max_inflight is not None and max_par > 0:
+                logger.info(
+                    "Weka fan-out: set concurrent_sessions so concurrent_sessions × %d stays near max_inflight_requests=%d, "
+                    "or rely on the semaphore to queue excess ready events",
+                    max_par,
+                    max_inflight,
+                )
+
         if self._compile_timing_jsonl_path is not None:
             self._compile_timing_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             self._compile_timing_jsonl_path.write_text("", encoding="utf-8")
@@ -1129,6 +1242,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         corpus_path = self._prompt_corpus_path()
         if not corpus_path.is_file():
             raise FileNotFoundError(f"Prompt corpus file not found: {corpus_path}")
+        parallelize = bool(self.weka_config.parallelize_sibling_subagents)
+        # When fan-out is off, identity records max=0 so pre-fan-out stores still match.
+        max_parallel = int(self.weka_config.max_parallel_subagents) if parallelize else 0
         return CompileIdentity(
             tokenizer_name_or_path=self._tokenizer_name_or_path(),
             corpus_path=str(corpus_path),
@@ -1136,6 +1252,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             base_seed=self.base_seed,
             default_block_size=self.weka_config.default_block_size,
             trace_idle_gap_cap_seconds=self.weka_config.trace_idle_gap_cap_seconds,
+            parallelize_sibling_subagents=parallelize,
+            max_parallel_subagents=max_parallel,
+            synthetic_system_prompt_tokens=getattr(self.weka_config, "synthetic_system_prompt_tokens", 0),
         )
 
     def _tokenize_prompt_corpus(self) -> None:
@@ -1469,6 +1588,26 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 raise ValueError(f"Duplicate trace ID found: {trace.id}")
             unique_traces[trace.id] = trace
 
+        # Inject synthetic system prompt if configured
+        if getattr(self.weka_config, "synthetic_system_prompt_tokens", 0) > 0:
+            for trace in unique_traces.values():
+                bs = trace.block_size if getattr(trace, "block_size", None) else self.weka_config.default_block_size
+                prefix_blocks = math.ceil(self.weka_config.synthetic_system_prompt_tokens / bs)
+                if prefix_blocks > 0:
+                    prefix_hashes = [-i for i in range(1, prefix_blocks + 1)]
+                    prefix_tokens = prefix_blocks * bs
+                    trace.system_tokens += prefix_tokens
+                    for req in trace.requests:
+                        # Note: WekaSubagentEntry class is checked via instance
+                        if hasattr(req, "subagent_type"): # heuristic for WekaSubagentEntry
+                            req.system_tokens += prefix_tokens
+                            for sub_req in req.requests:
+                                sub_req.hash_ids = prefix_hashes + sub_req.hash_ids
+                                sub_req.input_length += prefix_tokens
+                        else:
+                            req.hash_ids = prefix_hashes + req.hash_ids
+                            req.input_length += prefix_tokens
+
         return list(unique_traces.values())
 
     def _load_traces_from_local_file(self, file_path: Path) -> List[WekaTrace]:
@@ -1797,6 +1936,8 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     static_model_name=self.weka_config.static_model_name,
                     model_mapping=self.weka_config.model_mapping,
                     tokenizer_name_or_path=tokenizer_name_or_path,
+                    parallelize_sibling_subagents=self.weka_config.parallelize_sibling_subagents,
+                    max_parallel_subagents=self.weka_config.max_parallel_subagents,
                 )
                 in_flight[fut] = (trace_index, trace, time.perf_counter())
 
@@ -1901,6 +2042,8 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             use_static_model=self.weka_config.use_static_model,
             static_model_name=self.weka_config.static_model_name,
             model_mapping=self.weka_config.model_mapping,
+            parallelize_sibling_subagents=self.weka_config.parallelize_sibling_subagents,
+            max_parallel_subagents=self.weka_config.max_parallel_subagents,
         )
 
     def _build_model_map(self, trace: WekaTrace) -> Dict[str, str]:

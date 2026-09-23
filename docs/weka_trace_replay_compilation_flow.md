@@ -284,7 +284,7 @@ On a later run, if `duplicate_sessions_target` is set and the store already has 
 
 If the store has fewer artifacts than the target, the existing load/compile path runs for the gap only: unique traces are still loaded via `_load_weka_traces()`, store-aware expansion continues the global `__dupseed` counter from the max suffix already in the store, and only missing ids are reconstructed. Parent process writes new files after compile (workers never write the store).
 
-Compile identity (tokenizer `name_or_path`, corpus path and byte size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`, schema version) is checked before reuse. Model names are not part of identity.
+Compile identity (tokenizer `name_or_path`, corpus path and byte size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`, `parallelize_sibling_subagents`, `max_parallel_subagents`, schema version) is checked before reuse. Model names are not part of identity.
 
 ---
 

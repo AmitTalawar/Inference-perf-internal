@@ -68,6 +68,9 @@ class CompileIdentity:
     base_seed: int
     default_block_size: int
     trace_idle_gap_cap_seconds: float
+    parallelize_sibling_subagents: bool = False
+    max_parallel_subagents: int = 0
+    synthetic_system_prompt_tokens: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -77,10 +80,15 @@ class CompileIdentity:
             "base_seed": self.base_seed,
             "default_block_size": self.default_block_size,
             "trace_idle_gap_cap_seconds": self.trace_idle_gap_cap_seconds,
+            "parallelize_sibling_subagents": self.parallelize_sibling_subagents,
+            "max_parallel_subagents": self.max_parallel_subagents,
+            "synthetic_system_prompt_tokens": self.synthetic_system_prompt_tokens,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CompileIdentity":
+        # Missing fan-out keys default to off/0 so pre-fan-out manifests still
+        # match runs that leave parallelize_sibling_subagents disabled.
         return cls(
             tokenizer_name_or_path=str(data["tokenizer_name_or_path"]),
             corpus_path=str(data["corpus_path"]),
@@ -88,6 +96,9 @@ class CompileIdentity:
             base_seed=int(data["base_seed"]),
             default_block_size=int(data["default_block_size"]),
             trace_idle_gap_cap_seconds=float(data["trace_idle_gap_cap_seconds"]),
+            parallelize_sibling_subagents=bool(data.get("parallelize_sibling_subagents", False)),
+            max_parallel_subagents=int(data.get("max_parallel_subagents", 0)),
+            synthetic_system_prompt_tokens=int(data.get("synthetic_system_prompt_tokens", 0)),
         )
 
     def check_against(self, current: "CompileIdentity") -> None:
@@ -99,13 +110,24 @@ class CompileIdentity:
             "base_seed",
             "default_block_size",
             "trace_idle_gap_cap_seconds",
+            "parallelize_sibling_subagents",
+            "max_parallel_subagents",
         ):
             stored_value = getattr(self, field_name)
             current_value = getattr(current, field_name)
             if stored_value != current_value:
                 diffs.append(f"{field_name}: stored={stored_value!r} current={current_value!r}")
         if diffs:
-            raise CompileIdentityMismatchError("Weka compiled session store identity mismatch (" + "; ".join(diffs) + ")")
+            hint = ""
+            fanout_fields = {"parallelize_sibling_subagents", "max_parallel_subagents"}
+            if any(d.split(":", 1)[0] in fanout_fields for d in diffs):
+                hint = (
+                    " Fan-out identity changed; delete or repath compiled_store_path "
+                    "to rebuild graphs with the new sibling timing."
+                )
+            raise CompileIdentityMismatchError(
+                "Weka compiled session store identity mismatch (" + "; ".join(diffs) + ")." + hint
+            )
 
 
 @dataclass

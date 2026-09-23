@@ -204,11 +204,25 @@ class Worker(mp.Process):
                             )
                             return  # Exit this task, finally block will clean up
 
+                        inflight_sem = getattr(request_data, "inflight_semaphore", None)
+                        inflight_slot_held = False
+                        if inflight_sem is not None:
+                            if isinstance(inflight_sem, Semaphore):
+                                await inflight_sem.acquire()
+                            else:
+                                # multiprocessing Manager.Semaphore (sync)
+                                await event_loop.run_in_executor(None, inflight_sem.acquire)
+                            inflight_slot_held = True
+
                         with self.active_requests_counter.get_lock():
                             self.active_requests_counter.value += 1
                             inflight = True
 
-                        await self.client.process_request(request_data, stage_id, request_time, lora_adapter)
+                        try:
+                            await self.client.process_request(request_data, stage_id, request_time, lora_adapter)
+                        finally:
+                            if inflight_slot_held:
+                                inflight_sem.release()
                     except CancelledError:
                         pass
                     except Exception as e:

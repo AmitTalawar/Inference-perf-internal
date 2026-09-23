@@ -326,6 +326,43 @@ class WekaTraceReplayConfig(SessionReplayConfig):
             "Raw trace sources remain required in config and are used on cache miss/fill."
         ),
     )
+    parallelize_sibling_subagents: bool = Field(
+        False,
+        description=(
+            "When True, collapse parent-bracketed sibling subagent waves so their "
+            "first turns start together (batched by max_parallel_subagents). "
+            "Default False preserves recorded serial timing. Part of compiled-store identity."
+        ),
+    )
+    max_parallel_subagents: int = Field(
+        8,
+        ge=0,
+        description=(
+            "Max sibling subagents that start together in one wave batch when "
+            "parallelize_sibling_subagents is True. 0 means the whole wave. "
+            "Unused (identity records 0) when parallelize_sibling_subagents is False."
+        ),
+    )
+    max_inflight_requests: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Optional hard ceiling on concurrent live HTTP requests during Weka "
+            "session replay. Acquired after predecessor wait, released when the "
+            "request finishes. Cross-worker via the multiprocessing manager when "
+            "num_workers > 0. When unset, peak in-flight can approach "
+            "concurrent_sessions × max_parallel_subagents."
+        ),
+    )
+    synthetic_system_prompt_tokens: int = Field(
+        0,
+        ge=0,
+        description=(
+            "If > 0, injects a synthetic shared system prompt of this many tokens "
+            "at the start of every session (and sub-session). This is achieved by "
+            "prepending globally unique synthetic block hash IDs to all requests."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_trace_sources(self) -> "WekaTraceReplayConfig":

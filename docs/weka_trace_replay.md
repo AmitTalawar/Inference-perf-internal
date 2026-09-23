@@ -104,9 +104,34 @@ A store built under one compile identity cannot be reused under another. Mismatc
 - `load.base_seed`
 - `default_block_size`
 - `trace_idle_gap_cap_seconds`
+- `parallelize_sibling_subagents`
+- `max_parallel_subagents` (recorded as `0` when fan-out is off)
 - store `schema_version`
 
 Identity does **not** include `static_model_name`, `model_mapping`, or `use_static_model`. Live request payloads use `server.model_name`; stored `GraphCall.model` is ignored on the wire.
+
+Older manifests that omit the fan-out keys still match runs with `parallelize_sibling_subagents: false` (defaults to off / `max_parallel_subagents: 0`). Enabling fan-out or changing the cap requires deleting or repathing `compiled_store_path` so graphs rebuild once.
+
+### Sibling subagent fan-out
+
+Weka traces often record sibling `type: subagent` entries as a serial pipeline (each starts when the previous ends) even when their first turns share a long hash prefix. Set:
+
+```yaml
+data:
+  weka_trace_replay:
+    parallelize_sibling_subagents: true
+    max_parallel_subagents: 8          # 0 = whole wave
+    max_inflight_requests: 32          # optional hard HTTP ceiling
+```
+
+**Wave definition:** consecutive subagents between two parent (`n`/`s`) turns. Intra-subagent nested turns stay serial; only sibling starts collapse into concurrent batches of `max_parallel_subagents`.
+
+**Concurrency:** `load.stages[].concurrent_sessions` (how many session DAGs) and `max_parallel_subagents` (width of one wave) multiply. With both set to 8, peak in-flight can approach ~64 unless `max_inflight_requests` caps HTTP after predecessor wait.
+
+**Experiment recipes:**
+
+- Routing disagreement: `concurrent_sessions: 2–4`, `max_parallel_subagents: 8`, optional `max_inflight_requests: 32`
+- Fidelity baseline: leave `parallelize_sibling_subagents` false (default)
 
 ### Headers
 
