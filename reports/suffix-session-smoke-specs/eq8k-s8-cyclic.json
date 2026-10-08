@@ -1,0 +1,90 @@
+{
+ "pattern": "cyclic",
+ "seed": 0,
+ "turns": 4,
+ "user_tokens": 512,
+ "output_tokens": 128,
+ "sample_every": 8,
+ "sessions": [
+  {
+   "id": 0,
+   "initial_tokens": 8192,
+   "start_s": 0.0,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  },
+  {
+   "id": 1,
+   "initial_tokens": 8192,
+   "start_s": 3.75,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  },
+  {
+   "id": 2,
+   "initial_tokens": 8192,
+   "start_s": 7.5,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  },
+  {
+   "id": 3,
+   "initial_tokens": 8192,
+   "start_s": 11.25,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  },
+  {
+   "id": 4,
+   "initial_tokens": 8192,
+   "start_s": 15.0,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  },
+  {
+   "id": 5,
+   "initial_tokens": 8192,
+   "start_s": 18.75,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  },
+  {
+   "id": 6,
+   "initial_tokens": 8192,
+   "start_s": 22.5,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  },
+  {
+   "id": 7,
+   "initial_tokens": 8192,
+   "start_s": 26.25,
+   "think_s": [
+    30.0,
+    30.0,
+    30.0
+   ]
+  }
+ ]
+}

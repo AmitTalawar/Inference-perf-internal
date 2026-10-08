@@ -1,0 +1,230 @@
+2026-10-06 19:57:24,973 - inference_perf.config.config - INFO - Using configuration from: ../benchmark/configs/weka-7x21-port8000.yaml
+2026-10-06 19:57:24,978 - inference_perf.config.config - INFO - Benchmarking with the following config:
+
+api:
+  type: chat
+  streaming: true
+  headers: null
+  slo_unit: null
+  slo_tpot_header: null
+  slo_ttft_header: null
+  response_format: null
+  session_id_header_key: null
+data:
+  type: weka_trace_replay
+  path: null
+  corpus_file_path: null
+  input_distribution: null
+  output_distribution: null
+  shared_prefix: null
+  multimodal: null
+  trace: null
+  otel_trace_replay: null
+  weka_trace_replay:
+    trace_files:
+    - /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/release_all_weka.jsonl
+    num_dataset_entries: 100
+    duplicate_sessions_target: 100
+    compiled_store_path: /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3
+    compile_parallelism_mode: process
+    compile_workers: 32
+    compile_inflight_limit: 64
+    use_static_model: true
+    static_model_name: mistralai/Ministral-3-8B-Instruct-2512
+    default_block_size: 64
+    skip_invalid_files: true
+    clamp_substituted_output_to_recorded: true
+  conversation_replay: null
+  visionarena: null
+load:
+  type: trace_session_replay
+  interval: 1.0
+  stages:
+  - !!python/object:inference_perf.config.loadgen.config.TraceSessionReplayLoadStage
+    __dict__:
+      concurrent_sessions: 2
+      session_rate: null
+      num_sessions: 5
+      timeout: null
+    __pydantic_extra__: null
+    __pydantic_fields_set__: !!set
+      num_sessions: null
+      concurrent_sessions: null
+    __pydantic_private__: null
+  sweep: null
+  num_workers: 32
+  worker_max_concurrency: 20000
+  worker_max_tcp_connections: 2500
+  trace: null
+  circuit_breakers: []
+  request_timeout: 3000000000
+  lora_traffic_split: null
+  base_seed: 1787548644060
+metrics: null
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: true
+    per_adapter: true
+    per_adapter_stage: false
+    percentiles:
+    - 0.1
+    - 1.0
+    - 5.0
+    - 10.0
+    - 25.0
+    - 50.0
+    - 75.0
+    - 90.0
+    - 95.0
+    - 99.0
+    - 99.9
+    use_server_output_tokens: false
+    max_error_messages: 100
+  prometheus:
+    summary: true
+    per_stage: false
+  session_lifecycle:
+    summary: true
+    per_stage: true
+    per_session: false
+  goodput: null
+storage:
+  local_storage:
+    path: reports-20261006-195721
+    report_file_prefix: null
+  google_cloud_storage: null
+  simple_storage_service: null
+server:
+  type: vllm
+  model_name: mistralai/Ministral-3-8B-Instruct-2512
+  base_url: http://127.0.0.1:8000
+  verify_ssl: false
+tokenizer:
+  pretrained_model_name_or_path: mistralai/Ministral-3-8B-Instruct-2512
+circuit_breakers: null
+
+
+2026-10-06 19:57:24,978 - inference_perf.client.filestorage.local - INFO - Report files will be stored at: reports-20261006-195721
+2026-10-06 19:57:25,346 - huggingface_hub.utils._http - WARNING - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-06 19:57:27,147 - inference_perf.client.modelserver.openai_client - WARNING - TLS certificate verification is disabled (server.verify_ssl=false). Do not use this against untrusted networks.
+2026-10-06 19:57:29,275 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store: opening /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3
+2026-10-06 19:57:29,277 - inference_perf.datagen.weka_compiled_store - INFO - Weka compiled store: no manifest at /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3/manifest.json; treating as empty
+2026-10-06 19:57:29,278 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store: empty store at /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3; tokenizing corpus and compiling target=100 from raw traces
+2026-10-06 19:57:29,285 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Loaded prompt corpus from: /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/inference_perf/assets/shakespeare.txt (5020475 chars)
+2026-10-06 20:23:45,596 - inference_perf.config.config - INFO - Using configuration from: ../benchmark/configs/weka-7x21-port8000.yaml
+2026-10-06 20:23:45,601 - inference_perf.config.config - INFO - Benchmarking with the following config:
+
+api:
+  type: chat
+  streaming: true
+  headers: null
+  slo_unit: null
+  slo_tpot_header: null
+  slo_ttft_header: null
+  response_format: null
+  session_id_header_key: null
+data:
+  type: weka_trace_replay
+  path: null
+  corpus_file_path: null
+  input_distribution: null
+  output_distribution: null
+  shared_prefix: null
+  multimodal: null
+  trace: null
+  otel_trace_replay: null
+  weka_trace_replay:
+    trace_files:
+    - /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/release_all_weka.jsonl
+    num_dataset_entries: 5
+    duplicate_sessions_target: 5
+    compiled_store_path: /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3
+    compile_parallelism_mode: process
+    compile_workers: 32
+    compile_inflight_limit: 64
+    use_static_model: true
+    static_model_name: mistralai/Ministral-3-8B-Instruct-2512
+    default_block_size: 64
+    skip_invalid_files: true
+    clamp_substituted_output_to_recorded: true
+  conversation_replay: null
+  visionarena: null
+load:
+  type: trace_session_replay
+  interval: 1.0
+  stages:
+  - !!python/object:inference_perf.config.loadgen.config.TraceSessionReplayLoadStage
+    __dict__:
+      concurrent_sessions: 2
+      session_rate: null
+      num_sessions: 5
+      timeout: null
+    __pydantic_extra__: null
+    __pydantic_fields_set__: !!set
+      num_sessions: null
+      concurrent_sessions: null
+    __pydantic_private__: null
+  sweep: null
+  num_workers: 32
+  worker_max_concurrency: 20000
+  worker_max_tcp_connections: 2500
+  trace: null
+  circuit_breakers: []
+  request_timeout: 3000000000
+  lora_traffic_split: null
+  base_seed: 1787548644060
+metrics: null
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: true
+    per_adapter: true
+    per_adapter_stage: false
+    percentiles:
+    - 0.1
+    - 1.0
+    - 5.0
+    - 10.0
+    - 25.0
+    - 50.0
+    - 75.0
+    - 90.0
+    - 95.0
+    - 99.0
+    - 99.9
+    use_server_output_tokens: false
+    max_error_messages: 100
+  prometheus:
+    summary: true
+    per_stage: false
+  session_lifecycle:
+    summary: true
+    per_stage: true
+    per_session: false
+  goodput: null
+storage:
+  local_storage:
+    path: reports-20261006-202342
+    report_file_prefix: null
+  google_cloud_storage: null
+  simple_storage_service: null
+server:
+  type: vllm
+  model_name: mistralai/Ministral-3-8B-Instruct-2512
+  base_url: http://127.0.0.1:8000
+  verify_ssl: false
+tokenizer:
+  pretrained_model_name_or_path: mistralai/Ministral-3-8B-Instruct-2512
+circuit_breakers: null
+
+
+2026-10-06 20:23:45,602 - inference_perf.client.filestorage.local - INFO - Report files will be stored at: reports-20261006-202342
+2026-10-06 20:23:45,821 - huggingface_hub.utils._http - WARNING - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-06 20:23:47,838 - inference_perf.client.modelserver.openai_client - WARNING - TLS certificate verification is disabled (server.verify_ssl=false). Do not use this against untrusted networks.
+2026-10-06 20:23:50,135 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store: opening /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3
+2026-10-06 20:23:50,136 - inference_perf.datagen.weka_compiled_store - INFO - Weka compiled store: no manifest at /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3/manifest.json; treating as empty
+2026-10-06 20:23:50,137 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store: empty store at /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3; tokenizing corpus and compiling target=5 from raw traces
+2026-10-06 20:23:50,146 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Loaded prompt corpus from: /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/inference_perf/assets/shakespeare.txt (5020475 chars)

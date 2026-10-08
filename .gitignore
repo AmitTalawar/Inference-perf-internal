@@ -197,3 +197,11 @@ weka-modified.yaml
 
 #plan
 plan/
+
+# Large data artifacts (too big for GitHub / LFS limits) - kept local only
+merged_with_headers-for-nai.jsonl
+merged_with_headers.jsonl
+freeinference_converted_to_weka_1000.jsonl
+merged.jsonl
+dataset/weka-johnu-1261sess.jsonl
+weka_2026-05-31_2026-06-06.jsonl

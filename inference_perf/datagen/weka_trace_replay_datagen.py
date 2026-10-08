@@ -71,6 +71,7 @@ from multiprocessing.managers import SyncManager
 from huggingface_hub import hf_hub_download
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer
+from inference_perf.utils.custom_tokenizer import mistral_tokenizer_kwargs
 
 from inference_perf.config import APIConfig, DataConfig
 from inference_perf.datagen.replay_graph_session_datagen import (
@@ -225,7 +226,14 @@ class HashIdRandomGenerator:
         self._trace_id = trace_id
 
     def reseed_for_hash_id(self, hash_id: int) -> None:
-        seed_bytes = hashlib.sha256(f"{self.base_seed}:{self._trace_id}:{hash_id}".encode()).digest()
+        # NOTE: trace_id is intentionally excluded from the seed so that the same
+        # (global) block hash id synthesizes identical tokens across every
+        # session/user. Combined with global hash_ids in the trace file, this
+        # makes identical real blocks produce identical prompt text, so the
+        # server shares KV cache across sessions exactly as in production.
+        # (Seeding on trace_id would re-privatize the id namespace per session
+        # and eliminate all cross-session/cross-user cache reuse.)
+        seed_bytes = hashlib.sha256(f"{self.base_seed}:{hash_id}".encode()).digest()
         self._rng.seed(int.from_bytes(seed_bytes[:8], "big"))
 
     def randrange(self, stop: int) -> int:
@@ -857,7 +865,11 @@ def _build_trace_session_in_process(
     tokenizer = _PROCESS_TOKENIZER_CACHE.get(tokenizer_name_or_path)
     tokenizer_cache_hit = tokenizer is not None
     if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name_or_path,
+            trust_remote_code=True,
+            **mistral_tokenizer_kwargs(tokenizer_name_or_path),
+        )
         _PROCESS_TOKENIZER_CACHE[tokenizer_name_or_path] = tokenizer
     tokenizer_load_ms = int((time.perf_counter() - t_tok_start) * 1000)
 

@@ -1,0 +1,90 @@
+{
+ "pattern": "pareto",
+ "seed": 0,
+ "turns": 4,
+ "user_tokens": 512,
+ "output_tokens": 128,
+ "sample_every": 8,
+ "sessions": [
+  {
+   "id": 0,
+   "initial_tokens": 8192,
+   "start_s": 5.814,
+   "think_s": [
+    11.171,
+    25.963,
+    15.643
+   ]
+  },
+  {
+   "id": 1,
+   "initial_tokens": 8192,
+   "start_s": 24.599,
+   "think_s": [
+    17.888,
+    24.478,
+    150.0
+   ]
+  },
+  {
+   "id": 2,
+   "initial_tokens": 8192,
+   "start_s": 10.643,
+   "think_s": [
+    44.503,
+    17.984,
+    39.223
+   ]
+  },
+  {
+   "id": 3,
+   "initial_tokens": 8192,
+   "start_s": 8.952,
+   "think_s": [
+    12.437,
+    13.051,
+    40.466
+   ]
+  },
+  {
+   "id": 4,
+   "initial_tokens": 8192,
+   "start_s": 6.515,
+   "think_s": [
+    48.699,
+    48.631,
+    12.885
+   ]
+  },
+  {
+   "id": 5,
+   "initial_tokens": 8192,
+   "start_s": 9.433,
+   "think_s": [
+    23.56,
+    13.312,
+    10.91
+   ]
+  },
+  {
+   "id": 6,
+   "initial_tokens": 8192,
+   "start_s": 4.492,
+   "think_s": [
+    16.873,
+    11.001,
+    20.701
+   ]
+  },
+  {
+   "id": 7,
+   "initial_tokens": 8192,
+   "start_s": 17.524,
+   "think_s": [
+    20.742,
+    12.764,
+    73.19
+   ]
+  }
+ ]
+}

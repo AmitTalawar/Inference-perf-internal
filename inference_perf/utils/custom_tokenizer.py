@@ -11,15 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Any, Dict, Optional
+
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from transformers.tokenization_utils_base import VERY_LARGE_INTEGER
 from inference_perf.config import CustomTokenizerConfig
 
 
+def mistral_tokenizer_kwargs(pretrained_model_name_or_path: Optional[str]) -> Dict[str, Any]:
+    """Pass the transformers fix for Mistral tokenizers shipped with a broken pre-tokenizer regex."""
+    if pretrained_model_name_or_path and "mistral" in pretrained_model_name_or_path.lower():
+        return {"fix_mistral_regex": True}
+    return {}
+
+
 class CustomTokenizer:
     def __init__(self, config: CustomTokenizerConfig) -> None:
         self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
-            config.pretrained_model_name_or_path, token=config.token, trust_remote_code=config.trust_remote_code
+            config.pretrained_model_name_or_path,
+            token=config.token,
+            trust_remote_code=config.trust_remote_code,
+            **mistral_tokenizer_kwargs(config.pretrained_model_name_or_path),
         )
 
     def count_tokens(self, text: str, add_special_tokens: bool = True) -> int:

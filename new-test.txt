@@ -1,0 +1,445 @@
+2026-10-06 13:41:37,811 - inference_perf.config.config - INFO - Using configuration from: ../benchmark/configs/weka-7x21-port8000.yaml
+2026-10-06 13:41:37,816 - inference_perf.config.config - INFO - Benchmarking with the following config:
+
+api:
+  type: chat
+  streaming: true
+  headers: null
+  slo_unit: null
+  slo_tpot_header: null
+  slo_ttft_header: null
+  response_format: null
+  session_id_header_key: null
+data:
+  type: weka_trace_replay
+  path: null
+  corpus_file_path: null
+  input_distribution: null
+  output_distribution: null
+  shared_prefix: null
+  multimodal: null
+  trace: null
+  otel_trace_replay: null
+  weka_trace_replay:
+    trace_files:
+    - /home/ubuntu/hf_directory/freeinference_trace/release/2026-05-17_2026-05-23/traces/2026-05-17.jsonl
+    num_dataset_entries: 100
+    duplicate_sessions_target: 100
+    compiled_store_path: /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3
+    compile_parallelism_mode: process
+    compile_workers: 32
+    compile_inflight_limit: 64
+    use_static_model: true
+    static_model_name: mistralai/Ministral-3-8B-Instruct-2512
+    default_block_size: 64
+    skip_invalid_files: true
+    clamp_substituted_output_to_recorded: true
+  conversation_replay: null
+  visionarena: null
+load:
+  type: trace_session_replay
+  interval: 1.0
+  stages:
+  - !!python/object:inference_perf.config.loadgen.config.TraceSessionReplayLoadStage
+    __dict__:
+      concurrent_sessions: 2
+      session_rate: null
+      num_sessions: 5
+      timeout: null
+    __pydantic_extra__: null
+    __pydantic_fields_set__: !!set
+      concurrent_sessions: null
+      num_sessions: null
+    __pydantic_private__: null
+  sweep: null
+  num_workers: 32
+  worker_max_concurrency: 20000
+  worker_max_tcp_connections: 2500
+  trace: null
+  circuit_breakers: []
+  request_timeout: 3000000000
+  lora_traffic_split: null
+  base_seed: 1787548644060
+metrics: null
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: true
+    per_adapter: true
+    per_adapter_stage: false
+    percentiles:
+    - 0.1
+    - 1.0
+    - 5.0
+    - 10.0
+    - 25.0
+    - 50.0
+    - 75.0
+    - 90.0
+    - 95.0
+    - 99.0
+    - 99.9
+    use_server_output_tokens: false
+    max_error_messages: 100
+  prometheus:
+    summary: true
+    per_stage: false
+  session_lifecycle:
+    summary: true
+    per_stage: true
+    per_session: false
+  goodput: null
+storage:
+  local_storage:
+    path: reports-20261006-134136
+    report_file_prefix: null
+  google_cloud_storage: null
+  simple_storage_service: null
+server:
+  type: vllm
+  model_name: mistralai/Ministral-3-8B-Instruct-2512
+  base_url: http://127.0.0.1:8000
+  verify_ssl: false
+tokenizer:
+  pretrained_model_name_or_path: mistralai/Ministral-3-8B-Instruct-2512
+circuit_breakers: null
+
+
+2026-10-06 13:41:37,816 - inference_perf.client.filestorage.local - INFO - Report files will be stored at: reports-20261006-134136
+2026-10-06 13:41:38,009 - huggingface_hub.utils._http - WARNING - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-06 13:41:39,914 - inference_perf.client.modelserver.openai_client - WARNING - TLS certificate verification is disabled (server.verify_ssl=false). Do not use this against untrusted networks.
+2026-10-06 13:41:42,035 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store: opening /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3
+2026-10-06 13:41:42,036 - inference_perf.datagen.weka_compiled_store - INFO - Weka compiled store: no manifest at /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3/manifest.json; treating as empty
+2026-10-06 13:41:42,037 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store: empty store at /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3; tokenizing corpus and compiling target=100 from raw traces
+2026-10-06 13:41:42,044 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Loaded prompt corpus from: /home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/inference_perf/assets/shakespeare.txt (5020475 chars)
+2026-10-06 13:41:45,709 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 1 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:45,735 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 2 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...1], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...1], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...1], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...1], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,116 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 3 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,131 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 4 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,141 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 5 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...7], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...7], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...7], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...7], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,143 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 6 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,145 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 7 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,293 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 8 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we..., 'subagent': None}]}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,508 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 9 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,529 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 10 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,531 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 11 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,538 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 12 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,545 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 13 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...6], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...6], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...6], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...6], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,607 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 14 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,617 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 15 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...5], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...5], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...5], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...5], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,622 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 16 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,626 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 17 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,715 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 18 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...8], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...8], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...8], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...8], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,723 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 19 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,728 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 20 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...9], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...9], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...9], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...9], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,814 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 21 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...4], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,856 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 22 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...2], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,918 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 23 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:46,961 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 24 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:47,005 - inference_perf.datagen.weka_trace_replay_datagen - ERROR - Failed to validate row 25 in 2026-05-17.jsonl: 4 validation errors for WekaTrace
+id
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+models
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+block_size
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+requests
+  Field required [type=missing, input_value={'format_version': 1, 'we...3], 'tool_calls': []}]}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+2026-10-06 13:41:47,007 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka raw trace load: 0 unique trace(s) in 1413 ms
+2026-10-06 13:41:47,007 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store fill: loaded 0 stored session(s) in 0 ms
+2026-10-06 13:41:47,007 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store fill: stored=0 target=100 unique_raw=0 compiling=0 load_ms=0
+2026-10-06 13:41:47,007 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compile: no traces to reconstruct
+2026-10-06 13:41:47,007 - inference_perf.datagen.weka_trace_replay_datagen - INFO - Weka compiled store: write-through skipped (no newly compiled sessions) path=/home/ubuntu/sneh/opensource/eviction/Inference-perf-internal/data/compile_artifacts_new10_ministral3

@@ -111,13 +111,14 @@ class InferencePerfRunner:
 
 
 def main_cli() -> None:
-    # Set multiprocessing start method to 'fork' on macOS to avoid pickle issues
-    # This must be done before any multiprocessing operations
-    if sys.platform == "darwin":  # macOS
+    # Workers inherit WekaTraceReplayDataGenerator (holds a SyncManager).
+    # forkserver/spawn must pickle that manager and fail on Python 3.14
+    # (weakref in multiprocessing.util.Finalize). fork copies memory instead.
+    # Must run before Manager() or ProcessPoolExecutor.
+    if sys.platform != "win32":
         try:
             mp.set_start_method("fork", force=True)
         except RuntimeError:
-            # Start method already set, ignore
             pass
 
     # Parse command line arguments
