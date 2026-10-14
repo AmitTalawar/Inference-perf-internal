@@ -1853,7 +1853,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         tokenizer_instance = self.tokenizer.get_tokenizer()
         tokenizer_name_or_path = getattr(tokenizer_instance, "name_or_path", "")
-        fix_mistral_regex = getattr(tokenizer_instance, "fix_mistral_regex", None)
+        fix_mistral_regex = self.tokenizer.fix_mistral_regex
         if not tokenizer_name_or_path:
             logger.warning(
                 "Weka compile parallelism requested but tokenizer has no name_or_path; falling back to sequential compilation"

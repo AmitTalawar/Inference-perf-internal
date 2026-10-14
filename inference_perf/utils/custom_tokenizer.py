@@ -18,6 +18,7 @@ from inference_perf.config import CustomTokenizerConfig
 
 class CustomTokenizer:
     def __init__(self, config: CustomTokenizerConfig) -> None:
+        self.fix_mistral_regex = config.fix_mistral_regex
         self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
             config.pretrained_model_name_or_path,
             token=config.token,
