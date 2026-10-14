@@ -83,6 +83,8 @@ class TraceSessionReplayLoadStage(LoadStage):
     Modes:
     1. Simple concurrency control: set concurrent_sessions (and optionally num_sessions)
     2. Rate-based with concurrency: set concurrent_sessions + session_rate (+ num_sessions)
+    3. Time-boxed steady-state: set duration (+ optional warmup) to stop after wall-clock
+       time and report metrics only from the post-warmup measurement window
     """
 
     # Session concurrency control (REQUIRED)
@@ -111,12 +113,31 @@ class TraceSessionReplayLoadStage(LoadStage):
             "None = all remaining sessions."
         ),
     )
+    duration: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Wall-clock stage length in seconds. When reached, in-flight work is cancelled "
+            "and the stage exits as COMPLETED (time-boxed run). Keep num_sessions large "
+            "enough (or omit it) so concurrent_sessions stays full for the whole duration."
+        ),
+    )
+    warmup: Optional[float] = Field(
+        None,
+        ge=0,
+        description=(
+            "Seconds from stage start to exclude from summary / per-stage / goodput metrics. "
+            "Requires duration. Measurement window is [warmup, duration). "
+            "Per-request dumps still include warmup traffic for debugging."
+        ),
+    )
     timeout: Optional[float] = Field(
         None,
         gt=0,
         description=(
             "Wall-clock safety limit in seconds. If exceeded, in-flight sessions are "
-            "cancelled and stage exits as FAILED. Optional."
+            "cancelled and stage exits as FAILED. Optional. Prefer duration for "
+            "intentional time-boxed measurement runs."
         ),
     )
 
@@ -132,6 +153,21 @@ class TraceSessionReplayLoadStage(LoadStage):
                     f"concurrent_sessions ({self.concurrent_sessions}). "
                     f"You can't start sessions faster than the concurrency limit allows."
                 )
+
+        if self.warmup is not None and self.duration is None:
+            raise ValueError("warmup requires duration to be set on the stage")
+
+        if self.warmup is not None and self.duration is not None and self.warmup >= self.duration:
+            raise ValueError(
+                f"warmup ({self.warmup}) must be strictly less than duration ({self.duration})"
+            )
+
+        if self.timeout is not None and self.duration is not None and self.timeout <= self.duration:
+            raise ValueError(
+                f"timeout ({self.timeout}) must be greater than duration ({self.duration}) "
+                "when both are set (timeout is a hard FAILED safety limit beyond the "
+                "COMPLETED time-box)"
+            )
 
         return self
 

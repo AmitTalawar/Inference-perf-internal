@@ -446,6 +446,8 @@ class LoadGenerator:
         concurrent_sessions = stage.concurrent_sessions
         session_rate = stage.session_rate
         timeout = stage.timeout
+        duration = stage.duration
+        warmup = stage.warmup if stage.warmup is not None else 0.0
 
         # Compute this stage's session slice from the cursor
         available_sessions = total_sessions - self._session_cursor
@@ -459,9 +461,20 @@ class LoadGenerator:
         stage_start_cursor = self._session_cursor
         self._session_cursor += effective_num_sessions
 
+        if duration is not None and concurrent_sessions > 0 and effective_num_sessions < concurrent_sessions:
+            logger.warning(
+                "Stage %d: num_sessions (%d) < concurrent_sessions (%d); "
+                "concurrency will not stay saturated for a duration-based run. "
+                "Increase num_sessions / duplicate_sessions_target or omit num_sessions.",
+                stage_id,
+                effective_num_sessions,
+                concurrent_sessions,
+            )
+
         logger.info(
             f"Session pool: concurrent_sessions={concurrent_sessions}, "
-            f"session_rate={session_rate}, timeout={timeout}, "
+            f"session_rate={session_rate}, duration={duration}, warmup={warmup}, "
+            f"timeout={timeout}, "
             f"num_sessions={effective_num_sessions} (corpus offset {stage_start_cursor}), "
             f"total_sessions={total_sessions}"
         )
@@ -488,6 +501,10 @@ class LoadGenerator:
             }
             if session_rate is not None:
                 stage_info["session_rate"] = session_rate
+            if duration is not None:
+                stage_info["duration"] = duration
+            if warmup:
+                stage_info["warmup"] = warmup
             if timeout is not None:
                 stage_info["timeout"] = timeout
 
@@ -498,6 +515,8 @@ class LoadGenerator:
         sessions_dispatched = 0
         last_dispatch_time = start_time
         next_dispatch_time = start_time
+        peak_active_sessions = 0
+        duration_reached = False
 
         def should_start_next_session() -> bool:
             """Check if we should start the next session."""
@@ -593,9 +612,15 @@ class LoadGenerator:
         # Main dispatch and wait loop
         stage_task = None
         if progress_ctx:
-            stage_task = progress_ctx.add_task(description=f"Stage {stage_id} Sessions", total=effective_num_sessions)
+            if duration is not None:
+                stage_task = progress_ctx.add_task(description=f"Stage {stage_id} Duration", total=duration)
+            else:
+                stage_task = progress_ctx.add_task(description=f"Stage {stage_id} Sessions", total=effective_num_sessions)
 
         while True:
+            elapsed = time.perf_counter() - start_time
+            peak_active_sessions = max(peak_active_sessions, len(active_session_indices))
+
             # Check for interrupts
             if self.interrupt_sig:
                 if progress_ctx and stage_task:
@@ -621,7 +646,30 @@ class LoadGenerator:
                     del session_spans[sid]
                 break
 
-            if timeout is not None and time.perf_counter() - start_time >= timeout:
+            # Intentional time-box: COMPLETED (not FAILED). Checked before timeout.
+            if duration is not None and elapsed >= duration:
+                if progress_ctx and stage_task:
+                    progress_ctx.remove_task(stage_task)
+                    stage_task = None
+                duration_reached = True
+                logger.info(
+                    "Stage %d: duration %.1fs reached "
+                    "(completed_sessions=%d/%d, active=%d, peak_active=%d, warmup=%.1fs)",
+                    stage_id,
+                    duration,
+                    len(completed_session_ids),
+                    effective_num_sessions,
+                    len(active_session_indices),
+                    peak_active_sessions,
+                    warmup,
+                )
+                stage_status = StageStatus.COMPLETED
+                for sid in list(session_spans.keys()):
+                    otel_instr.end_session_span(session_spans[sid], "Session cancelled: stage duration reached")
+                    del session_spans[sid]
+                break
+
+            if timeout is not None and elapsed >= timeout:
                 if progress_ctx and stage_task:
                     progress_ctx.remove_task(stage_task)
                     stage_task = None
@@ -703,7 +751,10 @@ class LoadGenerator:
 
             # Update progress
             if progress_ctx and stage_task:
-                progress_ctx.update(stage_task, completed=len(completed_session_ids))
+                if duration is not None:
+                    progress_ctx.update(stage_task, completed=min(elapsed, duration))
+                else:
+                    progress_ctx.update(stage_task, completed=len(completed_session_ids))
 
         # Clean up progress task
         if progress_ctx and stage_task:
@@ -714,7 +765,8 @@ class LoadGenerator:
             stage_status = StageStatus.COMPLETED
 
         # Cancel in-flight tasks and drain stranded queue items.
-        # In the happy path this is a no-op (all items already processed).
+        # Always needed for duration-boxed stops (in-flight sessions remain).
+        # In the happy path (all sessions finished) this is a no-op.
         # In the failure path, process_failure sends a completion notification
         # immediately — before the worker picks up all items from the queue.
         # Without this, request_queue.join() hangs on items that never got task_done().
@@ -736,17 +788,34 @@ class LoadGenerator:
             otel_instr.end_stage_span(stage_span, error_msg)
             logger.info(f"Ended stage-level OTEL span for stage {stage_id}")
 
+        end_time_epoch = time.time()
+        end_time_perf = time.perf_counter()
         self.stage_runtime_info[stage_id] = StageRuntimeInfo(
             stage_id=stage_id,
             rate=session_rate if session_rate else 0.0,
             start_time=start_time_epoch,
-            end_time=time.time(),
+            end_time=end_time_epoch,
             status=stage_status,
             concurrency_level=concurrent_sessions,
             timeout=timeout,
+            duration=duration,
+            warmup=warmup if warmup > 0 else None,
+            start_time_perf=start_time,
+            end_time_perf=end_time_perf,
         )
+        actual_duration = end_time_perf - start_time
         logger.info(
-            "Stage %d - session-based run %s", stage_id, "completed" if stage_status == StageStatus.COMPLETED else "failed"
+            "Stage %d - session-based run %s "
+            "(actual_duration=%.1fs, duration_configured=%s, warmup=%s, "
+            "completed_sessions=%d, peak_active=%d, duration_reached=%s)",
+            stage_id,
+            "completed" if stage_status == StageStatus.COMPLETED else "failed",
+            actual_duration,
+            duration,
+            warmup if warmup > 0 else None,
+            len(completed_session_ids),
+            peak_active_sessions,
+            duration_reached,
         )
 
     async def run_stage(

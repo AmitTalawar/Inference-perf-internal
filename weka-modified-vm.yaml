@@ -1,8 +1,14 @@
 load:
   type: trace_session_replay
   stages:
-    - concurrent_sessions: 20
-      num_sessions: 40
+    - concurrent_sessions: 8
+      num_sessions: 100
+      # Time-boxed steady-state TTFT (example): keep concurrency full for 20 min,
+      # discard first 5 min from summaries, measure the remaining 15 min.
+      duration: 900
+      warmup: 300
+      # Ensure duplicate_sessions_target / num_sessions is large enough to not drain
+      # the pool before duration elapses.
   num_workers: 64
   worker_max_concurrency: 20000
   request_timeout: 3000000
@@ -23,10 +29,10 @@ data:
     #trace_directory: "/home/amit/dev/offloading/traces/inference-perf/data/traces"
     #trace_directory: "/home/amit/dev/offloading/traces/inference-perf/data/merged_with_headers"
     trace_files:                                  # List of specific trace files
-      - "/home/amit/dev/offloading/traces/inference-perf/data/merged_with_headers/trace.with_headers.jsonl"
-    num_dataset_entries: 40
-    duplicate_sessions_target: 40
-    compiled_store_path: "/home/amit/dev/offloading/traces/inference-perf/data/compile_artifacts"
+      - "/home/nutanix/amit/dev/Inference-perf-internal/merged_with_headers.jsonl"
+    num_dataset_entries: 100
+    duplicate_sessions_target: 100
+    compiled_store_path: "/home/nutanix/amit/dev/Inference-perf-internal/compile_artifacts"
     compile_parallelism_mode: "process"
     compile_workers: 64
     compile_inflight_limit: 64

@@ -103,6 +103,33 @@ def test_trace_session_replay_stage_forbids_extra_fields() -> None:
         TraceSessionReplayLoadStage(concurrent_sessions=2, bogus_field=1)  # type: ignore[call-arg]
 
 
+def test_trace_session_replay_stage_duration_and_warmup_valid() -> None:
+    stage = TraceSessionReplayLoadStage(concurrent_sessions=8, duration=1200, warmup=300)
+    assert stage.duration == 1200
+    assert stage.warmup == 300
+
+
+def test_trace_session_replay_stage_duration_only_valid() -> None:
+    stage = TraceSessionReplayLoadStage(concurrent_sessions=4, duration=60)
+    assert stage.duration == 60
+    assert stage.warmup is None
+
+
+def test_trace_session_replay_stage_warmup_requires_duration() -> None:
+    with pytest.raises(ValueError, match="warmup requires duration"):
+        TraceSessionReplayLoadStage(concurrent_sessions=2, warmup=30)
+
+
+def test_trace_session_replay_stage_warmup_must_be_less_than_duration() -> None:
+    with pytest.raises(ValueError, match="must be strictly less than duration"):
+        TraceSessionReplayLoadStage(concurrent_sessions=2, duration=60, warmup=60)
+
+
+def test_trace_session_replay_stage_timeout_must_exceed_duration() -> None:
+    with pytest.raises(ValueError, match="timeout .* must be greater than duration"):
+        TraceSessionReplayLoadStage(concurrent_sessions=2, duration=1200, timeout=1200)
+
+
 # --- LoadConfig cross-stage validation -----------------------------------
 
 

@@ -39,6 +39,13 @@ class StageRuntimeInfo(BaseModel):
     status: StageStatus
     concurrency_level: Optional[int] = None
     timeout: Optional[float] = None
+    # Time-boxed session-replay measurement (trace_session_replay).
+    # start/end_time above are wall-clock (time.time); request metrics use
+    # time.perf_counter — use *_perf fields when filtering request metrics.
+    duration: Optional[float] = None
+    warmup: Optional[float] = None
+    start_time_perf: Optional[float] = None
+    end_time_perf: Optional[float] = None
 
 
 class PerfRuntimeParameters:

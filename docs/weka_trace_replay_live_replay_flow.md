@@ -67,6 +67,14 @@ Main process keeps:
 
 Concurrency is controlled by `stage.concurrent_sessions`.
 
+Optional time-boxing:
+
+- `stage.duration` — stop after wall-clock seconds, cancel in-flight work, exit **COMPLETED**
+- `stage.warmup` — exclude early traffic from summary / per-stage / goodput reports (requires `duration`)
+- `stage.timeout` — hard **FAILED** safety limit (must be `>` `duration` when both are set)
+
+Keep `num_sessions` / `duplicate_sessions_target` large enough that the pool stays full for the whole `duration`.
+
 ### 3.2 Session dispatch
 
 `dispatch_session(session_idx)` does:

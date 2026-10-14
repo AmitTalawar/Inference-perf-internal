@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 from inference_perf.apis import RequestLifecycleMetric, ResponseMetrics, SessionLifecycleMetric, StreamedResponseMetrics
 from inference_perf.client.server_metrics import ServerMetricsClient, PerfRuntimeParameters
-from inference_perf.client.server_metrics.base import ModelServerMetrics, StageStatus
+from inference_perf.client.server_metrics.base import ModelServerMetrics, StageRuntimeInfo, StageStatus
 from inference_perf.client.server_metrics.prometheus_client import PrometheusMetricsClient
 from inference_perf.metrics.request_collector import RequestMetricCollector
 from inference_perf.config import (
@@ -41,6 +41,89 @@ from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.utils import ReportFile
 
 logger = logging.getLogger(__name__)
+
+
+def measurement_window_bounds(stage_info: StageRuntimeInfo) -> Optional[tuple[float, float]]:
+    """Return (measure_start, measure_end) in perf_counter time, or None if unfiltered.
+
+    When ``warmup`` is set on a time-boxed stage, summary metrics should only
+    include requests whose ``start_time`` (also perf_counter) falls in
+    ``[stage_start + warmup, min(stage_end, stage_start + duration))``.
+    """
+    if not stage_info.warmup or stage_info.warmup <= 0:
+        return None
+    if stage_info.start_time_perf is None or stage_info.end_time_perf is None:
+        logger.warning(
+            "Stage %d has warmup=%.1fs but missing perf_counter bounds; skipping measurement-window filter",
+            stage_info.stage_id,
+            stage_info.warmup,
+        )
+        return None
+
+    measure_start = stage_info.start_time_perf + stage_info.warmup
+    measure_end = stage_info.end_time_perf
+    if stage_info.duration is not None:
+        measure_end = min(measure_end, stage_info.start_time_perf + stage_info.duration)
+    return measure_start, measure_end
+
+
+def request_in_measurement_window(
+    metric: RequestLifecycleMetric,
+    stages: dict[int, StageRuntimeInfo],
+) -> bool:
+    """True if the request should be included in summarized (post-warmup) metrics."""
+    if metric.stage_id is None:
+        return True
+    stage_info = stages.get(metric.stage_id)
+    if stage_info is None:
+        return True
+    bounds = measurement_window_bounds(stage_info)
+    if bounds is None:
+        return True
+    measure_start, measure_end = bounds
+    return measure_start <= metric.start_time < measure_end
+
+
+def filter_metrics_to_measurement_window(
+    metrics: List[RequestLifecycleMetric],
+    stages: dict[int, StageRuntimeInfo],
+) -> List[RequestLifecycleMetric]:
+    """Keep requests that fall in each stage's post-warmup measurement window."""
+    if not metrics:
+        return metrics
+
+    filtered = [m for m in metrics if request_in_measurement_window(m, stages)]
+    excluded = len(metrics) - len(filtered)
+    if excluded:
+        logger.info(
+            "Excluded %d/%d request(s) outside post-warmup measurement window(s)",
+            excluded,
+            len(metrics),
+        )
+    return filtered
+
+
+def build_stage_request_metadata(stage_info: StageRuntimeInfo) -> dict[str, Any]:
+    """Metadata embedded in per-stage request lifecycle reports."""
+    metadata: dict[str, Any] = {
+        "stage_id": stage_info.stage_id,
+        "status": stage_info.status.name,
+        "actual_duration": stage_info.end_time - stage_info.start_time,
+        "concurrent_sessions": stage_info.concurrency_level,
+        "duration_configured": stage_info.duration,
+        "warmup_configured": stage_info.warmup,
+        "timeout_configured": stage_info.timeout,
+        "session_rate": stage_info.rate if stage_info.rate > 0 else None,
+    }
+    bounds = measurement_window_bounds(stage_info)
+    if bounds is not None:
+        measure_start, measure_end = bounds
+        metadata["measurement_window_sec"] = {
+            "start_offset": stage_info.warmup,
+            "end_offset": measure_end - (stage_info.start_time_perf or 0.0),
+            "length": measure_end - measure_start,
+        }
+    return metadata
 
 # Labels derived purely from the HTTP status code. These are authoritative: the
 # code comes from response.status, not from free-text, so a 400 can never be
@@ -741,13 +824,16 @@ class ReportGenerator:
         request_metrics = [
             metric for metric in self.metrics_collector.get_metrics() if metric.stage_id is not None and metric.stage_id >= 0
         ]
+        # Summary / per-stage / goodput use the post-warmup window when configured.
+        # Per-request dumps keep the full trace (including warmup) for debugging.
+        measured_request_metrics = filter_metrics_to_measurement_window(request_metrics, runtime_parameters.stages)
 
         if report_config.request_lifecycle.summary:
-            if len(request_metrics) != 0:
+            if len(measured_request_metrics) != 0:
                 report_file = ReportFile(
                     name="summary_lifecycle_metrics",
                     contents=summarize_requests(
-                        request_metrics,
+                        measured_request_metrics,
                         percentiles,
                         goodput_config=report_config.goodput,
                         tokenizer=tokenizer,
@@ -759,40 +845,64 @@ class ReportGenerator:
 
         if report_config.request_lifecycle.per_stage:
             stage_buckets: dict[int, List[RequestLifecycleMetric]] = defaultdict(list)
-            for metric in request_metrics:
+            for metric in measured_request_metrics:
                 if metric.stage_id is not None:
                     stage_buckets[metric.stage_id].append(metric)
-            for stage_id, metrics in stage_buckets.items():
-                stage_rate = runtime_parameters.stages[stage_id].rate
-                concurrency_level = runtime_parameters.stages[stage_id].concurrency_level
-                if concurrency_level is not None:
-                    report_file = ReportFile(
-                        name=f"stage_{stage_id}_lifecycle_metrics",
-                        contents=summarize_requests(
-                            metrics,
-                            percentiles,
-                            stage_rate,
-                            concurrency_level,
-                            goodput_config=report_config.goodput,
-                            tokenizer=tokenizer,
-                            use_server_output_tokens=use_server_output_tokens,
-                            max_error_messages=max_error_messages,
-                        ).model_dump(),
+            # Still emit a stage report when a stage ran but every request fell in warmup.
+            for stage_id, stage_info in runtime_parameters.stages.items():
+                stage_buckets.setdefault(stage_id, [])
+
+            for stage_id, metrics in sorted(stage_buckets.items()):
+                stage_info = runtime_parameters.stages[stage_id]
+                stage_rate = stage_info.rate
+                concurrency_level = stage_info.concurrency_level
+                if not metrics:
+                    logger.warning(
+                        "Stage %d: no requests in measurement window "
+                        "(warmup=%s, duration=%s); writing empty stage report",
+                        stage_id,
+                        stage_info.warmup,
+                        stage_info.duration,
                     )
+                    contents: dict[str, Any] = {
+                        "stage_metadata": build_stage_request_metadata(stage_info),
+                        "benchmark_time_seconds": 0.0,
+                        "load_summary": {"count": 0},
+                        "successes": {"count": 0},
+                        "failures": {"count": 0},
+                    }
                 else:
-                    report_file = ReportFile(
-                        name=f"stage_{stage_id}_lifecycle_metrics",
-                        contents=summarize_requests(
-                            metrics,
-                            percentiles,
-                            stage_rate,
-                            goodput_config=report_config.goodput,
-                            tokenizer=tokenizer,
-                            use_server_output_tokens=use_server_output_tokens,
-                            max_error_messages=max_error_messages,
-                        ).model_dump(),
+                    contents = summarize_requests(
+                        metrics,
+                        percentiles,
+                        stage_rate,
+                        concurrency_level,
+                        goodput_config=report_config.goodput,
+                        tokenizer=tokenizer,
+                        use_server_output_tokens=use_server_output_tokens,
+                        max_error_messages=max_error_messages,
+                    ).model_dump()
+                    contents = {"stage_metadata": build_stage_request_metadata(stage_info), **contents}
+                    latency = (contents.get("successes") or {}).get("latency") or {}
+                    ttft_summary = latency.get("time_to_first_token") or {}
+                    itl_summary = latency.get("inter_token_latency") or {}
+                    logger.info(
+                        "Stage %d lifecycle metrics: successes=%s failures=%s "
+                        "TTFT mean=%s ITL mean=%s (measurement window warmup=%s duration=%s)",
+                        stage_id,
+                        (contents.get("successes") or {}).get("count"),
+                        (contents.get("failures") or {}).get("count"),
+                        ttft_summary.get("mean"),
+                        itl_summary.get("mean"),
+                        stage_info.warmup,
+                        stage_info.duration,
                     )
-                lifecycle_reports.append(report_file)
+                lifecycle_reports.append(
+                    ReportFile(
+                        name=f"stage_{stage_id}_lifecycle_metrics",
+                        contents=contents,
+                    )
+                )
 
         if report_config.request_lifecycle.per_request:
             report_file = ReportFile(
@@ -801,6 +911,11 @@ class ReportGenerator:
                     {
                         "start_time": metric.start_time,
                         "end_time": metric.end_time,
+                        "stage_id": metric.stage_id,
+                        "session_id": metric.session_id,
+                        "in_measurement_window": request_in_measurement_window(
+                            metric, runtime_parameters.stages
+                        ),
                         "request": metric.request_data,
                         "response": metric.response_data,
                         "info": metric.info.model_dump() if metric.info else None,
@@ -813,7 +928,7 @@ class ReportGenerator:
 
         if report_config.request_lifecycle.per_adapter:
             adapter_buckets: dict[Optional[str], List[RequestLifecycleMetric]] = defaultdict(list)
-            for metric in request_metrics:
+            for metric in measured_request_metrics:
                 if metric.info.lora_adapter is not None:
                     adapter_buckets[metric.info.lora_adapter].append(metric)
             for adapter, metrics in adapter_buckets.items():
@@ -833,7 +948,7 @@ class ReportGenerator:
         if report_config.request_lifecycle.per_adapter_stage:
             # Group by (adapter, stage_id) tuple
             adapter_stage_buckets: dict[tuple[Optional[str], int], List[RequestLifecycleMetric]] = defaultdict(list)
-            for metric in request_metrics:
+            for metric in measured_request_metrics:
                 if metric.stage_id is not None and metric.info.lora_adapter is not None:
                     adapter_stage_buckets[(metric.info.lora_adapter, metric.stage_id)].append(metric)
             for (adapter, stage_id), metrics in adapter_stage_buckets.items():
@@ -1024,10 +1139,18 @@ class ReportGenerator:
                         "stage_id": stage_id,
                         "status": status_str,
                         "timeout_configured": stage_info.timeout,
+                        "duration_configured": stage_info.duration,
+                        "warmup_configured": stage_info.warmup,
                         "actual_duration": stage_info.end_time - stage_info.start_time,
                         "concurrent_sessions": stage_info.concurrency_level,
                         "session_rate": stage_info.rate if stage_info.rate > 0 else None,
                     }
+                    # Duration-boxed stages exit COMPLETED even when cancelled mid-flight;
+                    # distinguish that from a full corpus drain for session reports.
+                    if stage_info.duration is not None and status_str == "COMPLETED":
+                        actual = stage_info.end_time - stage_info.start_time
+                        if actual >= stage_info.duration * 0.95:
+                            stage_metadata["exit_reason"] = "duration_reached"
 
                     # Insert stage_metadata as first key
                     stage_summary = {"stage_metadata": stage_metadata, **stage_summary}

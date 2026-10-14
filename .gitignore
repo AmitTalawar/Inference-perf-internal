@@ -197,3 +197,8 @@ weka-modified.yaml
 
 #plan
 plan/
+
+compile_artifacts/*
+
+merged*
+trace*

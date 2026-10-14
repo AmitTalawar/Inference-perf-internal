@@ -271,7 +271,8 @@ Configures storage for benchmark results:
 storage:
   local_storage:
     path: "reports-{timestamp}"       # Local directory path
-    report_file_prefix: null          # Optional filename prefix
+    
+    _file_prefix: null          # Optional filename prefix
   google_cloud_storage:               # Optional GCS configuration
     bucket_name: "your-bucket-name"   # Required GCS bucket
     path: "reports-{timestamp}"       # Optional path prefix
@@ -464,7 +465,9 @@ load:
     - concurrent_sessions: 4                      # Max sessions active simultaneously
       num_sessions: 20                            # Run 20 sessions in this stage
       session_rate: 2.0                           # Optional: start max 2 sessions/sec
-      timeout: 300                                # Optional: stage timeout in seconds
+      duration: 1200                              # Optional: time-box stage (COMPLETED)
+      warmup: 300                                 # Optional: exclude first N seconds from summaries
+      timeout: 1500                               # Optional: hard FAILED safety limit (> duration)
   num_workers: 4                                  # Worker processes
   worker_max_concurrency: 10                      # Max concurrent requests per worker
 ```
@@ -478,13 +481,24 @@ load:
 **`num_sessions`** (optional): Number of sessions to run in this stage
 - If omitted, runs all remaining sessions in the corpus
 - Stages advance through the corpus sequentially (like standard load stages)
+- For `duration`-boxed runs, keep this large enough (or omit) so concurrency stays saturated
 
 **`session_rate`** (optional): Rate limit for starting new sessions
 - Omit for no rate limiting
 - Useful for controlled ramp-up scenarios
 
+**`duration`** (optional): Wall-clock stage length in seconds
+- When reached, in-flight work is cancelled and the stage exits as **COMPLETED** (intentional time-box)
+- Use with a large corpus / `duplicate_sessions_target` so `concurrent_sessions` stays full
+
+**`warmup`** (optional): Seconds from stage start excluded from summary / per-stage / goodput metrics
+- Requires `duration`; must be strictly less than `duration`
+- Measurement window is `[warmup, duration)` by request `start_time`
+- Per-request dumps still include warmup traffic (`in_measurement_window` flag)
+
 **`timeout`** (optional): Wall-clock safety limit
-- If exceeded, in-flight sessions are cancelled and stage exits as FAILED
+- If exceeded, in-flight sessions are cancelled and stage exits as **FAILED**
+- Prefer `duration` for intentional time-boxed measurement; if both are set, `timeout` must be greater than `duration`
 
 #### Trace File Format
 
@@ -634,13 +648,15 @@ data:
 | `load.type` | Must be `trace_session_replay`. |
 | `stages[].concurrent_sessions` | Max sessions active at once (`0` = unlimited). |
 | `stages[].num_sessions` | How many sessions this stage dispatches. Must not exceed the compiled corpus size. |
+| `stages[].duration` | Optional wall-clock time-box (seconds). Stage exits COMPLETED and cancels in-flight work. |
+| `stages[].warmup` | Optional seconds excluded from summary metrics (requires `duration`). |
 | `num_workers` | Worker processes for live HTTP replay (not compile workers). |
 | `worker_max_concurrency` | Max in-flight request tasks per worker, including events blocked on predecessors. |
 | `worker_max_tcp_connections` | Max TCP connections per worker (default `2500`). |
 | `request_timeout` | Per-request HTTP timeout in **seconds**. Omit for no extra timeout. |
 | `base_seed` | Seed for hash-id prompt synthesis, session shuffle, and compiled-store sampling. Also part of compiled-store identity. |
 
-Stage extras shared with OTel (`session_rate`, `timeout`) apply here too.
+Stage extras shared with OTel (`session_rate`, `timeout`, `duration`, `warmup`) apply here too.
 
 #### `data.weka_trace_replay` keys (active)
 
