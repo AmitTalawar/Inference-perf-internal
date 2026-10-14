@@ -24,4 +24,7 @@ class CustomTokenizerConfig(StrictBaseModel):
     trust_remote_code: Optional[bool] = Field(
         default=None, description="Allow the tokenizer to execute code from its repository when loading."
     )
+    fix_mistral_regex: Optional[bool] = Field(
+        default=None, description="Fix the incorrect regex pattern in affected Mistral tokenizers."
+    )
     token: Optional[str] = Field(default=None, description="HuggingFace access token used to download the tokenizer.")

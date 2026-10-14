@@ -19,7 +19,10 @@ from inference_perf.config import CustomTokenizerConfig
 class CustomTokenizer:
     def __init__(self, config: CustomTokenizerConfig) -> None:
         self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
-            config.pretrained_model_name_or_path, token=config.token, trust_remote_code=config.trust_remote_code
+            config.pretrained_model_name_or_path,
+            token=config.token,
+            trust_remote_code=config.trust_remote_code,
+            fix_mistral_regex=config.fix_mistral_regex,
         )
 
     def count_tokens(self, text: str, add_special_tokens: bool = True) -> int:

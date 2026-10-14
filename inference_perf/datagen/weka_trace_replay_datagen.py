@@ -931,6 +931,7 @@ def _build_trace_session_in_process(
     static_model_name: str,
     model_mapping: Optional[Dict[str, str]],
     tokenizer_name_or_path: str,
+    fix_mistral_regex: Optional[bool],
     parallelize_sibling_subagents: bool = False,
     max_parallel_subagents: int = 8,
 ) -> Tuple[Optional[ReplaySession], Dict[str, Any]]:
@@ -939,7 +940,11 @@ def _build_trace_session_in_process(
     tokenizer = _PROCESS_TOKENIZER_CACHE.get(tokenizer_name_or_path)
     tokenizer_cache_hit = tokenizer is not None
     if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name_or_path,
+            trust_remote_code=True,
+            fix_mistral_regex=fix_mistral_regex,
+        )
         _PROCESS_TOKENIZER_CACHE[tokenizer_name_or_path] = tokenizer
     tokenizer_load_ms = int((time.perf_counter() - t_tok_start) * 1000)
 
@@ -1848,6 +1853,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         tokenizer_instance = self.tokenizer.get_tokenizer()
         tokenizer_name_or_path = getattr(tokenizer_instance, "name_or_path", "")
+        fix_mistral_regex = getattr(tokenizer_instance, "fix_mistral_regex", None)
         if not tokenizer_name_or_path:
             logger.warning(
                 "Weka compile parallelism requested but tokenizer has no name_or_path; falling back to sequential compilation"
@@ -1936,6 +1942,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     static_model_name=self.weka_config.static_model_name,
                     model_mapping=self.weka_config.model_mapping,
                     tokenizer_name_or_path=tokenizer_name_or_path,
+                    fix_mistral_regex=fix_mistral_regex,
                     parallelize_sibling_subagents=self.weka_config.parallelize_sibling_subagents,
                     max_parallel_subagents=self.weka_config.max_parallel_subagents,
                 )
