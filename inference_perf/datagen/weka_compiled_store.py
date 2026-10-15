@@ -29,7 +29,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 from urllib.parse import quote, unquote
 
 import orjson
@@ -138,11 +138,16 @@ class StoredSession:
     graph: ReplayGraph
     schema_version: int = SCHEMA_VERSION
 
+    @property
+    def event_count(self) -> int:
+        return len(self.graph.events)
+
 
 @dataclass
 class StoreManifest:
     compile_identity: CompileIdentity
     artifact_ids: List[str]
+    event_counts: Dict[str, int]
     schema_version: int = SCHEMA_VERSION
     codec: str = DEFAULT_CODEC
 
@@ -388,6 +393,7 @@ class WekaCompiledSessionStore:
         self.manifest_path = self.root / "manifest.json"
         self.sessions_dir = self.root / "sessions"
         self.artifact_ids: List[str] = []
+        self.event_counts: Dict[str, int] = {}
         self._artifact_id_set: set[str] = set()
         self._codec = get_codec(codec_name)
 
@@ -395,8 +401,9 @@ class WekaCompiledSessionStore:
         if not self.manifest_path.is_file():
             logger.info("Weka compiled store: no manifest at %s; treating as empty", self.manifest_path)
             self.artifact_ids = []
+            self.event_counts = {}
             self._artifact_id_set = set()
-            return StoreManifest(compile_identity=self.identity, artifact_ids=[])
+            return StoreManifest(compile_identity=self.identity, artifact_ids=[], event_counts={})
 
         blob = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         schema_version = int(blob.get("schema_version", SCHEMA_VERSION))
@@ -412,6 +419,18 @@ class WekaCompiledSessionStore:
         artifact_ids = [str(x) for x in blob.get("artifact_ids") or []]
         self.artifact_ids = artifact_ids
         self._artifact_id_set = set(artifact_ids)
+        raw_counts = blob.get("event_counts") or {}
+        self.event_counts = {str(k): int(v) for k, v in raw_counts.items()}
+        missing_counts = [aid for aid in artifact_ids if aid not in self.event_counts]
+        if missing_counts:
+            logger.info(
+                "Weka compiled store: backfilling event_count for %d/%d artifact(s) missing from manifest",
+                len(missing_counts),
+                len(artifact_ids),
+            )
+            for stored in self.read_sessions(missing_counts):
+                self.event_counts[stored.artifact_id] = stored.event_count
+            self.write_manifest()
         logger.info(
             "Weka compiled store: identity ok path=%s codec=%s stored=%d tokenizer=%s "
             "corpus=%s corpus_bytes=%d base_seed=%s default_block_size=%s idle_gap_cap=%s",
@@ -430,6 +449,7 @@ class WekaCompiledSessionStore:
             codec=codec_name,
             compile_identity=stored_identity,
             artifact_ids=list(artifact_ids),
+            event_counts=dict(self.event_counts),
         )
 
     def session_path(self, artifact_id: str) -> Path:
@@ -438,7 +458,7 @@ class WekaCompiledSessionStore:
     def write_session(self, session: StoredSession) -> None:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write_bytes(self.session_path(session.artifact_id), encode_session(session, self._codec))
-        self._remember_artifact_id(session.artifact_id)
+        self._remember_artifact(session.artifact_id, session.event_count)
 
     def write_sessions(self, sessions: Sequence[StoredSession]) -> None:
         """Encode and write session files in a parent-process thread pool."""
@@ -454,17 +474,17 @@ class WekaCompiledSessionStore:
             self.root,
         )
 
-        def _write_one(session: StoredSession) -> str:
+        def _write_one(session: StoredSession) -> Tuple[str, int]:
             _atomic_write_bytes(self.session_path(session.artifact_id), encode_session(session, self._codec))
-            return session.artifact_id
+            return session.artifact_id, session.event_count
 
         if workers == 1:
-            written_ids = [_write_one(session) for session in sessions]
+            written = [_write_one(session) for session in sessions]
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                written_ids = list(executor.map(_write_one, sessions))
-        for artifact_id in written_ids:
-            self._remember_artifact_id(artifact_id)
+                written = list(executor.map(_write_one, sessions))
+        for artifact_id, event_count in written:
+            self._remember_artifact(artifact_id, event_count)
 
     def read_session(self, artifact_id: str) -> StoredSession:
         path = self.session_path(artifact_id)
@@ -494,10 +514,11 @@ class WekaCompiledSessionStore:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             return list(executor.map(self.read_session, artifact_ids))
 
-    def _remember_artifact_id(self, artifact_id: str) -> None:
+    def _remember_artifact(self, artifact_id: str, event_count: int) -> None:
         if artifact_id not in self._artifact_id_set:
             self.artifact_ids.append(artifact_id)
             self._artifact_id_set.add(artifact_id)
+        self.event_counts[artifact_id] = int(event_count)
 
     def write_manifest(self) -> None:
         payload = {
@@ -505,6 +526,7 @@ class WekaCompiledSessionStore:
             "codec": self.codec_name,
             "compile_identity": self.identity.to_dict(),
             "artifact_ids": list(self.artifact_ids),
+            "event_counts": {aid: int(self.event_counts.get(aid, 0)) for aid in self.artifact_ids},
         }
         _atomic_write_text(self.manifest_path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
         logger.info(
@@ -515,3 +537,15 @@ class WekaCompiledSessionStore:
 
     def contains(self, artifact_id: str) -> bool:
         return artifact_id in self._artifact_id_set
+
+    def artifact_ids_with_min_events(self, min_events: Optional[int]) -> List[str]:
+        """Return artifact ids in store order that satisfy ``event_count >= min_events``.
+
+        When ``min_events`` is None or <= 0, all artifact ids are returned.
+        """
+        if min_events is None or min_events <= 0:
+            return list(self.artifact_ids)
+        return [aid for aid in self.artifact_ids if self.event_counts.get(aid, 0) >= min_events]
+
+    def qualifying_count(self, min_events: Optional[int]) -> int:
+        return len(self.artifact_ids_with_min_events(min_events))

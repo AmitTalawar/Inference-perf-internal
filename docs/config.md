@@ -631,6 +631,7 @@ data:
       - "path/to/traces.jsonl"
     num_dataset_entries: 3000
     duplicate_sessions_target: 3000
+    min_events: 1                 # optional: replay only sessions with >= N LLM calls
     compiled_store_path: "path/to/compile_artifacts"
     compile_parallelism_mode: "process"
     compile_workers: 64
@@ -672,14 +673,15 @@ Stage extras shared with OTel (`session_rate`, `timeout`, `duration`, `warmup`) 
 
 | Key | What it does |
 |-----|----------------|
-| `num_dataset_entries` | Max **unique** raw traces to load (default `100`). Used on cache miss / fill, not as the store sample size. |
-| `duplicate_sessions_target` | Target compiled session count. Weka expands traces **before** reconstruct with ids `{original_id}__dupseed{N}` (each duplicate is a full compile, not a shared graph). When `compiled_store_path` is set, this is also how many sessions to sample from the store. |
+| `num_dataset_entries` | Target count of **unique** raw traces that satisfy `min_events` (default `100`). The loader keeps scanning the source (and still keeps shorter traces it sees) until this many qualify, or the source is exhausted. Used on cache miss / fill, not as the store sample size. |
+| `duplicate_sessions_target` | Target compiled session count. Weka expands traces **before** reconstruct with ids `{original_id}__dupseed{N}` (each duplicate is a full compile, not a shared graph). When `compiled_store_path` is set, this is also how many sessions to sample from the store (after `min_events` filtering). |
+| `min_events` | Optional minimum LLM-call count (`len(graph.events)`) for a session to be selected for replay. **Not** part of compiled-store identity: every compiled trace is still written to the store; this is a sample-time filter. Changing it does not invalidate the store. When set, unique loading keeps searching until `num_dataset_entries` sessions qualify, and full-hit / sampling use only artifacts with `event_count >= min_events`. |
 
 **Compiled session store:**
 
 | Key | What it does |
 |-----|----------------|
-| `compiled_store_path` | Directory for compiled `ReplayGraph` cache. Write-through on miss. Full hit (`stored >= duplicate_sessions_target`) skips corpus tokenization and raw trace load. Identity mismatch (tokenizer name, corpus path/size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`, `parallelize_sibling_subagents`, `max_parallel_subagents`) fails the run. Model name is not part of identity. When enabling sibling fan-out against an existing store, delete or repath the store so graphs rebuild. |
+| `compiled_store_path` | Directory for compiled `ReplayGraph` cache. Write-through on miss. Full hit (`qualifying stored >= duplicate_sessions_target`, where qualifying respects `min_events`) skips corpus tokenization and raw trace load. Identity mismatch (tokenizer name, corpus path/size, `base_seed`, `default_block_size`, `trace_idle_gap_cap_seconds`, `parallelize_sibling_subagents`, `max_parallel_subagents`) fails the run. Model name and `min_events` are not part of identity. When enabling sibling fan-out against an existing store, delete or repath the store so graphs rebuild. Manifest records per-artifact `event_counts` for filtering without decompressing every session. |
 
 **Compile parallelism:**
 

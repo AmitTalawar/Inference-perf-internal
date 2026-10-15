@@ -69,6 +69,25 @@ TWO_TURN_TRACE: Dict[str, Any] = {
     ],
 }
 
+ONE_TURN_TRACE: Dict[str, Any] = {
+    "id": "mock_trace_short",
+    "models": ["stored-model-a"],
+    "block_size": 2,
+    "tool_tokens": 0,
+    "system_tokens": 0,
+    "requests": [
+        {
+            "t": 0.1,
+            "type": "n",
+            "model": "stored-model-a",
+            "in": 4,
+            "out": 2,
+            "hash_ids": [10, 20],
+            "api_time": 0.5,
+        },
+    ],
+}
+
 
 def _tiny_graph() -> ReplayGraph:
     call = GraphCall(
@@ -298,12 +317,18 @@ def _make_tokenizer() -> Tuple[MagicMock, MagicMock, List[int]]:
     return tokenizer, inner, encode_calls
 
 
+def _write_jsonl(path: Path, traces: List[Dict[str, Any]]) -> Path:
+    path.write_text("\n".join(json.dumps(t) for t in traces) + "\n", encoding="utf-8")
+    return path
+
+
 def _make_generator(
     trace_file: Path,
     *,
     store_path: Optional[Path] = None,
     duplicate_sessions_target: Optional[int] = None,
     num_dataset_entries: int = 100,
+    min_events: Optional[int] = None,
     base_seed: int = 42,
     use_static_model: bool = False,
     static_model_name: str = "",
@@ -326,6 +351,8 @@ def _make_generator(
         kwargs["compiled_store_path"] = str(store_path)
     if duplicate_sessions_target is not None:
         kwargs["duplicate_sessions_target"] = duplicate_sessions_target
+    if min_events is not None:
+        kwargs["min_events"] = min_events
     if use_static_model:
         kwargs["use_static_model"] = True
         kwargs["static_model_name"] = static_model_name
@@ -471,3 +498,83 @@ def test_partial_fill_then_full_hit(tmp_path: Path) -> None:
     )
     assert encode_calls_hit == []
     assert len(gen_hit.sessions) == 2
+
+
+def test_manifest_records_event_counts(tmp_path: Path) -> None:
+    trace_file = _write_trace_file(tmp_path / "mock_trace.json", TWO_TURN_TRACE)
+    store_path = tmp_path / "compiled_store"
+    _make_generator(trace_file, store_path=store_path, duplicate_sessions_target=1)
+    manifest = json.loads((store_path / "manifest.json").read_text(encoding="utf-8"))
+    assert "event_counts" in manifest
+    assert manifest["event_counts"]["mock_trace_123"] == 2
+
+
+def test_min_events_stores_short_traces_but_filters_replay(tmp_path: Path) -> None:
+    trace_file = _write_jsonl(tmp_path / "mixed.jsonl", [ONE_TURN_TRACE, TWO_TURN_TRACE])
+    store_path = tmp_path / "compiled_store"
+    gen, _ = _make_generator(
+        trace_file,
+        store_path=store_path,
+        duplicate_sessions_target=1,
+        num_dataset_entries=1,
+        min_events=2,
+    )
+    artifact_ids = sorted(p.name for p in (store_path / "sessions").glob("*.orjson.zst"))
+    assert len(artifact_ids) == 2  # short + long both written
+    assert len(gen.sessions) == 1
+    assert all(len(s.graph.events) >= 2 for s in gen.sessions if s is not None)
+
+    # Raising/lowering min_events reuses the same store without identity failure.
+    gen2, _ = _make_generator(
+        trace_file,
+        store_path=store_path,
+        duplicate_sessions_target=1,
+        num_dataset_entries=1,
+        min_events=1,
+    )
+    assert len(gen2.sessions) == 1
+
+
+def test_min_events_full_hit_uses_qualifying_only(tmp_path: Path) -> None:
+    trace_file = _write_jsonl(tmp_path / "mixed.jsonl", [ONE_TURN_TRACE, TWO_TURN_TRACE])
+    store_path = tmp_path / "compiled_store"
+    _make_generator(
+        trace_file,
+        store_path=store_path,
+        duplicate_sessions_target=1,
+        num_dataset_entries=1,
+        min_events=2,
+    )
+    trace_file.unlink()
+    tokenizer2, _, encode_calls2 = _make_tokenizer()
+    gen2, _ = _make_generator(
+        trace_file,
+        store_path=store_path,
+        duplicate_sessions_target=1,
+        num_dataset_entries=1,
+        min_events=2,
+        tokenizer=tokenizer2,
+    )
+    assert encode_calls2 == []
+    assert len(gen2.sessions) == 1
+    assert all(len(s.graph.events) >= 2 for s in gen2.sessions if s is not None)
+
+
+def test_event_counts_backfill_from_legacy_manifest(tmp_path: Path) -> None:
+    trace_file = _write_trace_file(tmp_path / "mock_trace.json", TWO_TURN_TRACE)
+    store_path = tmp_path / "compiled_store"
+    _make_generator(trace_file, store_path=store_path, duplicate_sessions_target=1)
+    manifest_path = store_path / "manifest.json"
+    blob = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del blob["event_counts"]
+    manifest_path.write_text(json.dumps(blob, indent=2) + "\n", encoding="utf-8")
+
+    gen, _ = _make_generator(
+        trace_file,
+        store_path=store_path,
+        duplicate_sessions_target=1,
+        min_events=2,
+    )
+    assert len(gen.sessions) == 1
+    restored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert restored["event_counts"]["mock_trace_123"] == 2

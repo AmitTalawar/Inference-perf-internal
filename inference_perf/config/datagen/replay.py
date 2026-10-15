@@ -326,6 +326,19 @@ class WekaTraceReplayConfig(SessionReplayConfig):
             "Raw trace sources remain required in config and are used on cache miss/fill."
         ),
     )
+    min_events: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Minimum number of LLM-call events (compiled ReplayGraph events) a session "
+            "must have to be selected for replay. Not part of compiled-store identity: "
+            "all traces are still written to the store; this is a sample-time filter. "
+            "When set, unique raw loading keeps scanning until num_dataset_entries "
+            "sessions with at least this many events are available (non-qualifying "
+            "traces encountered along the way are still stored), and store sampling / "
+            "full-hit checks use only qualifying artifacts."
+        ),
+    )
     parallelize_sibling_subagents: bool = Field(
         False,
         description=(

@@ -3,8 +3,8 @@
 load:
   type: trace_session_replay
   stages:
-    - concurrent_sessions: 100
-      num_sessions: 200
+    - concurrent_sessions: 10
+      num_sessions: 30
       duration: 900
       warmup: 300
   num_workers: 128
@@ -16,25 +16,26 @@ api:
   streaming: true
 server:
   type: vllm
-  model_name: mistralai/Ministral-3-8B-Reasoning-2512
+  model_name: gradientai/Llama-3-70B-Instruct-Gradient-262k
   base_url: http://localhost:8000
   verify_ssl: false
 tokenizer:
-  pretrained_model_name_or_path: mistralai/Ministral-3-8B-Reasoning-2512
+  pretrained_model_name_or_path: gradientai/Llama-3-70B-Instruct-Gradient-262k
   fix_mistral_regex: true
 data:
   type: weka_trace_replay
   weka_trace_replay:
     trace_files:
       - "/home/ubuntu/dev/Inference-perf-internal/freeinference_converted_to_weka_1000.jsonl"
-    num_dataset_entries: 3000
-    duplicate_sessions_target: 3000
-    compiled_store_path: "/home/ubuntu/dev/Inference-perf-internal/compiled-artifacts-mistral"
+    num_dataset_entries: 30
+    duplicate_sessions_target: 30
+    min_events: 100
+    compiled_store_path: "/home/ubuntu/dev/Inference-perf-internal/compiled-artifacts-llama-2"
     compile_parallelism_mode: "process"
     compile_workers: 128
     compile_inflight_limit: 128
     use_static_model: true
-    static_model_name: "mistralai/Ministral-3-8B-Reasoning-2512"
+    static_model_name: "gradientai/Llama-3-70B-Instruct-Gradient-262k"
     default_block_size: 64
     skip_invalid_files: true
     clamp_substituted_output_to_recorded: true

@@ -148,6 +148,22 @@ class WekaTrace(BaseModel):
     requests: List[WekaRequest]
 
 
+def raw_llm_call_count(trace: WekaTrace) -> int:
+    """Estimate LLM-call (event) count from a raw Weka trace.
+
+    Parent ``n``/``s`` turns count as one call each; each nested subagent
+    request counts as one call. Used while loading/duplicating before compile;
+    the compiled store indexes the authoritative ``len(graph.events)``.
+    """
+    count = 0
+    for req in trace.requests:
+        if isinstance(req, WekaSubagentEntry):
+            count += len(req.requests)
+        else:
+            count += 1
+    return count
+
+
 # =============================================================================
 # Timeline Timing & Warping
 # =============================================================================
@@ -1102,15 +1118,24 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         store = self._open_compiled_store()
         target = self.weka_config.duplicate_sessions_target
+        min_events = self._min_events_threshold()
         sessions: Optional[List[ReplaySession]] = None
         store_full_hit = False
-        if store is not None and target is not None and store.manifest_path.is_file() and len(store.artifact_ids) >= target:
+        qualifying_stored = store.qualifying_count(min_events) if store is not None else 0
+        if (
+            store is not None
+            and target is not None
+            and store.manifest_path.is_file()
+            and qualifying_stored >= target
+        ):
             store_full_hit = True
             logger.info(
                 "Weka compiled store full hit: skipping corpus tokenization and raw trace load; "
-                "sampling %d of %d stored session(s) from %s",
+                "sampling %d of %d qualifying session(s) (stored=%d min_events=%s) from %s",
                 target,
+                qualifying_stored,
                 len(store.artifact_ids),
+                min_events if min_events > 0 else None,
                 store.root,
             )
             t_lookup_start = time.perf_counter()
@@ -1121,6 +1146,8 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 "compiled_store_lookup",
                 {
                     "stored_count": len(store.artifact_ids),
+                    "qualifying_count": qualifying_stored,
+                    "min_events": min_events if min_events > 0 else None,
                     "desired_count": target,
                     "hit_count": target,
                     "miss_count": 0,
@@ -1160,12 +1187,14 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 )
             else:
                 logger.info(
-                    "Weka compiled store partial miss: path=%s stored=%d target=%d filling=%d; "
-                    "tokenizing corpus and loading raw traces",
+                    "Weka compiled store partial miss: path=%s stored=%d qualifying=%d target=%d "
+                    "filling_qualifying=%d min_events=%s; tokenizing corpus and loading raw traces",
                     store.root,
                     len(store.artifact_ids),
+                    qualifying_stored,
                     target,
-                    target - len(store.artifact_ids),
+                    target - qualifying_stored,
+                    min_events if min_events > 0 else None,
                 )
             self._tokenize_prompt_corpus()
             t_trace_load_start = time.perf_counter()
@@ -1298,6 +1327,24 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         store.load()
         return store
 
+    def _min_events_threshold(self) -> int:
+        """Return configured min_events, or 0 when unset (no filter)."""
+        value = self.weka_config.min_events
+        return int(value) if value is not None else 0
+
+    def _filter_sessions_by_min_events(self, sessions: List[ReplaySession]) -> List[ReplaySession]:
+        threshold = self._min_events_threshold()
+        if threshold <= 0:
+            return sessions
+        filtered = [session for session in sessions if len(session.graph.events) >= threshold]
+        logger.info(
+            "Weka min_events filter: kept %d/%d session(s) with event_count >= %d",
+            len(filtered),
+            len(sessions),
+            threshold,
+        )
+        return filtered
+
     def _replay_session_from_stored(self, stored: StoredSession, index: int) -> ReplaySession:
         return ReplaySession(
             session_id=f"wekatrace{index}_{stored.artifact_id}",
@@ -1314,14 +1361,26 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
     def _load_sampled_sessions_from_store(
         self, store: WekaCompiledSessionStore, target: int
     ) -> Tuple[List[ReplaySession], Dict[str, Dict[str, str]]]:
-        ids = list(store.artifact_ids)
+        min_events = self._min_events_threshold()
+        ids = store.artifact_ids_with_min_events(min_events if min_events > 0 else None)
+        if len(ids) < target:
+            raise ValueError(
+                f"Weka compiled store has only {len(ids)} session(s) with "
+                f"event_count >= {min_events if min_events > 0 else 0} "
+                f"(stored={len(store.artifact_ids)}); need {target}. "
+                "Lower min_events, increase num_dataset_entries / duplicate_sessions_target, "
+                "or compile more traces into the store."
+            )
         random.seed(self.base_seed)
         random.shuffle(ids)
         selected = ids[:target]
         logger.info(
-            "Weka compiled store: sampled %d of %d artifact(s) with base_seed=%s",
+            "Weka compiled store: sampled %d of %d qualifying artifact(s) "
+            "(stored=%d min_events=%s) with base_seed=%s",
             len(selected),
+            len(ids),
             len(store.artifact_ids),
+            min_events if min_events > 0 else None,
             self.base_seed,
         )
         sessions: List[ReplaySession] = []
@@ -1391,11 +1450,28 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             "Weka compiled store write-through: wrote %d session(s) to %s in %d ms", written_count, store.root, write_ms
         )
 
+    def _trace_meets_min_events(self, trace: WekaTrace) -> bool:
+        return raw_llm_call_count(trace) >= self._min_events_threshold()
+
+    def _count_qualifying_traces(self, traces: List[WekaTrace]) -> int:
+        threshold = self._min_events_threshold()
+        if threshold <= 0:
+            return len(traces)
+        return sum(1 for trace in traces if raw_llm_call_count(trace) >= threshold)
+
+    def _qualifying_trace_sources(self, traces: List[WekaTrace]) -> List[WekaTrace]:
+        """Traces that meet min_events and are safe to duplicate toward the target."""
+        threshold = self._min_events_threshold()
+        if threshold <= 0:
+            return traces
+        return [trace for trace in traces if raw_llm_call_count(trace) >= threshold]
+
     def _expand_traces_for_duplication_target(
         self,
         traces: List[WekaTrace],
         stored_artifact_ids: Optional[Set[str]] = None,
         desired_count: Optional[int] = None,
+        stored_qualifying_count: Optional[int] = None,
     ) -> List[WekaTrace]:
         """Expand traces to duplicate_sessions_target *before* reconstruction.
 
@@ -1407,6 +1483,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         When ``stored_artifact_ids`` is set, only traces whose ids are not already
         in the store are returned, using today's global ``__dupseed`` counter
         continued from the max suffix already present in the store.
+
+        Expansion targets enough sessions that *qualify* under ``min_events``
+        (estimated via :func:`raw_llm_call_count`). Non-qualifying unique traces
+        are still included so they can be written through to the store.
         """
         target = desired_count if desired_count is not None else self.weka_config.duplicate_sessions_target
         if target is None:
@@ -1414,15 +1494,26 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         if not traces:
             return traces
 
-        if stored_artifact_ids is None:
-            if len(traces) >= target:
-                return traces
+        dup_sources = self._qualifying_trace_sources(traces)
 
+        if stored_artifact_ids is None:
             expanded: List[WekaTrace] = list(traces)
+            if self._count_qualifying_traces(expanded) >= target:
+                return expanded
+            if not dup_sources:
+                logger.warning(
+                    "Weka prebuild duplication: no traces meet min_events=%s; "
+                    "cannot expand to qualifying target=%d (have qualifying=%d)",
+                    self.weka_config.min_events,
+                    target,
+                    self._count_qualifying_traces(expanded),
+                )
+                return expanded
+
             dup_counter = 0
             src_idx = 0
-            while len(expanded) < target:
-                src = traces[src_idx % len(traces)]
+            while self._count_qualifying_traces(expanded) < target:
+                src = dup_sources[src_idx % len(dup_sources)]
                 src_idx += 1
                 dup_counter += 1
                 synthetic_trace_id = f"{src.id}__dupseed{dup_counter}"
@@ -1433,33 +1524,54 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 {
                     "original_trace_count": len(traces),
                     "expanded_trace_count": len(expanded),
+                    "qualifying_trace_count": self._count_qualifying_traces(expanded),
                     "duplicate_sessions_target": target,
+                    "min_events": self.weka_config.min_events,
                 },
             )
             logger.info(
-                "Weka prebuild duplication expanded traces from %d to %d (target=%d)",
+                "Weka prebuild duplication expanded traces from %d to %d "
+                "(qualifying=%d target=%d min_events=%s)",
                 len(traces),
                 len(expanded),
+                self._count_qualifying_traces(expanded),
                 target,
+                self.weka_config.min_events,
             )
             return expanded
 
-        need = target - len(stored_artifact_ids)
-        if need <= 0:
-            return []
-
+        already_qualifying = (
+            stored_qualifying_count if stored_qualifying_count is not None else len(stored_artifact_ids)
+        )
+        need = target - already_qualifying
+        # Always write through unique traces not yet in the store (including short ones).
         new_traces: List[WekaTrace] = []
         for trace in traces:
             if trace.id not in stored_artifact_ids:
                 new_traces.append(trace)
-                if len(new_traces) >= need:
-                    break
+
+        if need <= 0:
+            return new_traces
+
+        qualifying_already_queued = self._count_qualifying_traces(new_traces)
+        still_need = need - qualifying_already_queued
+        if still_need <= 0:
+            return new_traces
+        if not dup_sources:
+            logger.warning(
+                "Weka store-aware duplication: no traces meet min_events=%s; "
+                "cannot fill qualifying target=%d (stored_qualifying=%d)",
+                self.weka_config.min_events,
+                target,
+                already_qualifying,
+            )
+            return new_traces
 
         dup_counter = max_dupseed_suffix(stored_artifact_ids)
         src_idx = 0
         used_ids: Set[str] = set(stored_artifact_ids) | {t.id for t in new_traces}
-        while len(new_traces) < need:
-            src = traces[src_idx % len(traces)]
+        while still_need > 0:
+            src = dup_sources[src_idx % len(dup_sources)]
             src_idx += 1
             dup_counter += 1
             synthetic_trace_id = f"{src.id}__dupseed{dup_counter}"
@@ -1467,6 +1579,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 continue
             used_ids.add(synthetic_trace_id)
             new_traces.append(src.model_copy(update={"id": synthetic_trace_id}))
+            still_need -= 1
 
         if any("__dupseed" in trace.id for trace in new_traces):
             self._emit_compile_timing(
@@ -1476,14 +1589,19 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     "expanded_trace_count": len(stored_artifact_ids) + len(new_traces),
                     "duplicate_sessions_target": target,
                     "stored_artifact_count": len(stored_artifact_ids),
+                    "stored_qualifying_count": already_qualifying,
                     "new_compile_count": len(new_traces),
+                    "min_events": self.weka_config.min_events,
                 },
             )
             logger.info(
-                "Weka store-aware prebuild duplication: stored=%d new=%d target=%d",
+                "Weka store-aware prebuild duplication: stored=%d stored_qualifying=%d "
+                "new=%d target=%d min_events=%s",
                 len(stored_artifact_ids),
+                already_qualifying,
                 len(new_traces),
                 target,
+                self.weka_config.min_events,
             )
         return new_traces
 
@@ -1511,17 +1629,32 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         Local sources support:
         - `.json`: one Weka trace object per file
         - `.jsonl`: one Weka trace object per line
-        """
-        raw_traces: List[WekaTrace] = []
-        max_entries = self.weka_config.num_dataset_entries
 
-        def _append_with_cap(traces_in_file: List[WekaTrace]) -> bool:
-            """Append traces up to max_entries; return True when cap reached."""
-            remaining = max_entries - len(raw_traces)
-            if remaining <= 0:
-                return True
-            raw_traces.extend(traces_in_file[:remaining])
-            return len(raw_traces) >= max_entries
+        Stopping rule: keep reading until ``num_dataset_entries`` traces meet
+        ``min_events`` (when unset, every loaded trace counts, matching the old
+        hard cap). Non-qualifying traces encountered while searching are kept
+        and returned so they can still be written to the compiled store.
+        """
+        target_qualifying = self.weka_config.num_dataset_entries
+        min_events = self._min_events_threshold()
+        unique_traces: Dict[str, WekaTrace] = {}
+        qualifying = 0
+
+        def _accept_trace(trace: WekaTrace) -> bool:
+            """Record trace; return True when the qualifying target is met."""
+            nonlocal qualifying
+            if trace.id in unique_traces:
+                raise ValueError(f"Duplicate trace ID found: {trace.id}")
+            unique_traces[trace.id] = trace
+            if raw_llm_call_count(trace) >= min_events:
+                qualifying += 1
+            return qualifying >= target_qualifying
+
+        def _accept_many(traces_in_file: List[WekaTrace]) -> bool:
+            for trace in traces_in_file:
+                if _accept_trace(trace):
+                    return True
+            return False
 
         if self.weka_config.trace_directory:
             trace_dir = Path(self.weka_config.trace_directory)
@@ -1532,11 +1665,11 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 raise ValueError(f"No JSON/JSONL files found in {trace_dir}")
 
             for f in files:
-                if len(raw_traces) >= max_entries:
+                if qualifying >= target_qualifying:
                     break
                 try:
                     traces_in_file = self._load_traces_from_local_file(f)
-                    if _append_with_cap(traces_in_file):
+                    if _accept_many(traces_in_file):
                         break
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
@@ -1545,7 +1678,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         elif self.weka_config.trace_files:
             for path in self.weka_config.trace_files:
-                if len(raw_traces) >= max_entries:
+                if qualifying >= target_qualifying:
                     break
                 f = Path(path)
                 if not f.is_file():
@@ -1554,7 +1687,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     raise ValueError(f"Trace file must be a .json or .jsonl file: {path}")
                 try:
                     traces_in_file = self._load_traces_from_local_file(f)
-                    if _append_with_cap(traces_in_file):
+                    if _accept_many(traces_in_file):
                         break
                 except Exception as e:
                     logger.error(f"Failed to load trace {f.name}: {e}")
@@ -1573,25 +1706,36 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
                 with open(local_path, "r", encoding="utf-8") as file_stream:
                     for line_idx, line in enumerate(file_stream):
-                        if line_idx >= self.weka_config.num_dataset_entries:
+                        if qualifying >= target_qualifying:
                             break
-                        if line.strip():
-                            try:
-                                blob = json.loads(line)
-                                raw_traces.append(WekaTrace.model_validate(blob))
-                            except Exception as e:
-                                logger.error(f"Failed to validate row {line_idx}: {e}")
-                                if not self.weka_config.skip_invalid_files:
-                                    raise
+                        if not line.strip():
+                            continue
+                        try:
+                            blob = json.loads(line)
+                            if _accept_trace(WekaTrace.model_validate(blob)):
+                                break
+                        except Exception as e:
+                            logger.error(f"Failed to validate row {line_idx}: {e}")
+                            if not self.weka_config.skip_invalid_files:
+                                raise
             except Exception as e:
                 raise ValueError(f"Failed to load Hugging Face dataset {repo_id}: {e}") from e
 
-        # Ensure unique trace IDs
-        unique_traces: Dict[str, WekaTrace] = {}
-        for trace in raw_traces:
-            if trace.id in unique_traces:
-                raise ValueError(f"Duplicate trace ID found: {trace.id}")
-            unique_traces[trace.id] = trace
+        logger.info(
+            "Weka raw trace load: loaded=%d qualifying=%d num_dataset_entries=%d min_events=%s",
+            len(unique_traces),
+            qualifying,
+            target_qualifying,
+            self.weka_config.min_events,
+        )
+        if qualifying < target_qualifying:
+            logger.warning(
+                "Weka raw trace load: only %d/%d traces meet min_events=%s after scanning the source; "
+                "duplication may pad the remainder if duplicate_sessions_target is set",
+                qualifying,
+                target_qualifying,
+                self.weka_config.min_events,
+            )
 
         # Inject synthetic system prompt if configured
         if getattr(self.weka_config, "synthetic_system_prompt_tokens", 0) > 0:
@@ -1604,7 +1748,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     trace.system_tokens += prefix_tokens
                     for req in trace.requests:
                         # Note: WekaSubagentEntry class is checked via instance
-                        if hasattr(req, "subagent_type"): # heuristic for WekaSubagentEntry
+                        if hasattr(req, "subagent_type"):  # heuristic for WekaSubagentEntry
                             req.system_tokens += prefix_tokens
                             for sub_req in req.requests:
                                 sub_req.hash_ids = prefix_hashes + sub_req.hash_ids
@@ -1642,10 +1786,21 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         traces: List[WekaTrace],
         store: Optional[WekaCompiledSessionStore] = None,
     ) -> List[ReplaySession]:
+        min_events = self._min_events_threshold()
         if store is None:
             logger.info("Weka session build: store unset; compiling %d loaded unique trace(s)", len(traces))
             traces = self._expand_traces_for_duplication_target(traces)
             sessions = self._compile_trace_list(traces)
+            sessions = self._filter_sessions_by_min_events(sessions)
+            target = self.weka_config.duplicate_sessions_target
+            if target is not None and len(sessions) < target:
+                raise ValueError(
+                    f"Weka compile produced only {len(sessions)} session(s) with "
+                    f"event_count >= {min_events if min_events > 0 else 0}; need {target}. "
+                    "Lower min_events, increase num_dataset_entries, or provide more traces."
+                )
+            if target is not None and len(sessions) > target:
+                sessions = sessions[:target]
             random.seed(self.base_seed)
             random.shuffle(sessions)
             logger.info("Weka session build: compiled %d session(s) without store", len(sessions))
@@ -1674,6 +1829,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     "miss_count": len(to_compile),
                     "full_hit": False,
                     "load_ms": lookup_ms,
+                    "min_events": self.weka_config.min_events,
                 },
             )
             logger.info(
@@ -1688,6 +1844,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             self._write_through_sessions(store, compiled, to_compile)
             sessions = [stored_by_id[trace.id] for trace in traces if trace.id in stored_by_id]
             sessions.extend(compiled)
+            sessions = self._filter_sessions_by_min_events(sessions)
             self._reassign_session_ids(sessions)
             random.seed(self.base_seed)
             random.shuffle(sessions)
@@ -1702,31 +1859,43 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         t_lookup_start = time.perf_counter()
         stored_sessions, stored_headers = self._load_all_stored_sessions(store)
         lookup_ms = int((time.perf_counter() - t_lookup_start) * 1000)
+        stored_qualifying = store.qualifying_count(min_events if min_events > 0 else None)
         logger.info(
-            "Weka compiled store fill: loaded %d stored session(s) in %d ms",
+            "Weka compiled store fill: loaded %d stored session(s) (%d qualifying) in %d ms",
             len(stored_sessions),
+            stored_qualifying,
             lookup_ms,
         )
         self._trace_headers_by_source_id.update(stored_headers)
-        need = target - len(stored_ids)
-        to_compile = self._expand_traces_for_duplication_target(traces, stored_artifact_ids=stored_ids, desired_count=target)
+        need = target - stored_qualifying
+        to_compile = self._expand_traces_for_duplication_target(
+            traces,
+            stored_artifact_ids=stored_ids,
+            desired_count=target,
+            stored_qualifying_count=stored_qualifying,
+        )
         logger.info(
-            "Weka compiled store fill: stored=%d target=%d unique_raw=%d compiling=%d load_ms=%d",
+            "Weka compiled store fill: stored=%d qualifying=%d target=%d unique_raw=%d "
+            "compiling=%d min_events=%s load_ms=%d",
             len(stored_ids),
+            stored_qualifying,
             target,
             len(traces),
             len(to_compile),
+            self.weka_config.min_events,
             lookup_ms,
         )
         self._emit_compile_timing(
             "compiled_store_lookup",
             {
                 "stored_count": len(stored_ids),
+                "qualifying_count": stored_qualifying,
                 "desired_count": target,
-                "hit_count": len(stored_ids),
+                "hit_count": stored_qualifying,
                 "miss_count": max(0, need),
                 "full_hit": False,
                 "load_ms": lookup_ms,
+                "min_events": self.weka_config.min_events,
             },
         )
         for trace in to_compile:
@@ -1734,23 +1903,15 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 self._trace_headers_by_source_id[trace.id] = dict(trace.session_headers)
         compiled = self._compile_trace_list(to_compile)
         self._write_through_sessions(store, compiled, to_compile)
-        sessions = list(stored_sessions) + compiled
-        if len(sessions) < target:
-            raise ValueError(
-                f"Weka compiled store could not assemble {target} sessions "
-                f"(stored={len(stored_sessions)}, newly_compiled={len(compiled)}). "
-                "Increase num_dataset_entries, fix invalid traces, or lower duplicate_sessions_target."
-            )
-        if len(sessions) > target:
-            sessions = sessions[:target]
-        self._reassign_session_ids(sessions)
-        random.seed(self.base_seed)
-        random.shuffle(sessions)
+        # Prefer sampling from the updated store index so event_counts drive selection.
+        sessions, sample_headers = self._load_sampled_sessions_from_store(store, target)
+        self._trace_headers_by_source_id.update(sample_headers)
         logger.info(
-            "Weka compiled store fill complete: stored=%d newly_compiled=%d assembled=%d",
-            len(stored_sessions),
+            "Weka compiled store fill complete: stored=%d newly_compiled=%d assembled=%d min_events=%s",
+            len(store.artifact_ids),
             len(compiled),
             len(sessions),
+            self.weka_config.min_events,
         )
         return sessions
 

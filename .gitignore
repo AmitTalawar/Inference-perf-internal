@@ -203,3 +203,4 @@ compile_artifacts/*
 merged*
 trace*
 freeinference_convert*
+compiled-artifacts*
