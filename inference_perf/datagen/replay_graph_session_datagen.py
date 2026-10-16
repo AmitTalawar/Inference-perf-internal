@@ -463,6 +463,13 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                 # - there were multiple tool calls (vLLM only accepts one name at a time).
                 payload["tool_choice"] = "required"
 
+        # vLLM session-aware GPU/CPU eviction reads OpenAI body field `session_id`.
+        # Prefer the loadgen-stamped session_id (unique per replay session, including
+        # weka `__dupseed` / `_dupN` duplicates) over parsing event_id.
+        session_id = self.session_id if isinstance(self.session_id, str) and self.session_id else self._extract_session_id()
+        if session_id:
+            payload["session_id"] = session_id
+
         return payload
 
     def _extract_session_id(self) -> str:
@@ -1610,6 +1617,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
                 session_index=session_index,
                 local_event_index=local,
                 preferred_worker_id=session_worker_id,
+                session_id=session.session_id,
             )
             for local in range(len(events))
         ]
@@ -1849,7 +1857,9 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             expected_output_is_tool_call=gc.expected_output_is_tool_call if gc else False,
             expected_output_tool_names=gc.expected_output_tool_names if gc else None,
             otel_context=data.otel_context,
-            session_id=data.session_id,
+            # Prefer loadgen-stamped session_id; fall back to the qualified event prefix
+            # (wekatrace{i}_{source_id}[__dupseedN] / {id}_dupN) so duplicates stay unique.
+            session_id=data.session_id if isinstance(data.session_id, str) and data.session_id else session_id,
             preferred_worker_id=data.preferred_worker_id,
             # Pass KV-cache invalidation configuration and session random string
             inject_random_session_id=self.replay_config.inject_random_session_id if self.replay_config else False,

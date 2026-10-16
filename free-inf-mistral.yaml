@@ -4,7 +4,7 @@ load:
   type: trace_session_replay
   stages:
     - concurrent_sessions: 20
-      num_sessions: 60
+      num_sessions: 200
       duration: 900
       warmup: 300
   num_workers: 128
@@ -27,8 +27,8 @@ data:
   weka_trace_replay:
     trace_files:
       - "/home/ubuntu/dev/Inference-perf-internal/freeinference_converted_to_weka_1000.jsonl"
-    num_dataset_entries: 60
-    duplicate_sessions_target: 60
+    num_dataset_entries: 200
+    duplicate_sessions_target: 200
     min_events: 100
     compiled_store_path: "/home/ubuntu/dev/Inference-perf-internal/compiled-artifacts-mistral-2"
     compile_parallelism_mode: "process"

@@ -287,6 +287,20 @@ class TestSessionChatCompletionAPIData:
         )
 
     @pytest.mark.asyncio
+    async def test_to_request_body_includes_stable_session_id(self) -> None:
+        """Chat payload must carry session_id for vLLM session-aware eviction."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        # Duplicate weka-style id must stay intact on the wire.
+        dup_sid = "wekatrace3_traceA__dupseed2"
+        api_data = self._make_api_data(f"{dup_sid}:event_0", registry, tracker)
+        api_data.session_id = dup_sid
+
+        payload = await api_data.to_request_body("model", 50, False, False)
+
+        assert payload["session_id"] == dup_sid
+
+    @pytest.mark.asyncio
     async def test_non_streaming_captures_output(self) -> None:
         """process_response captures output and registers it."""
         registry = EventOutputRegistry()
