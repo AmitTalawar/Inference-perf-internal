@@ -22,10 +22,17 @@
 # WARNING: runs `rm -rf /dev/shm/*`. Do not run other /dev/shm workloads on
 # this host during the sweep.
 #
+# Scenarios (select with --scenarios; default runs all three in this order):
+#   lru-lru            GPU native LRU + CPU LRU
+#   lru-sessions       GPU native LRU + CPU prefix_pruning_on_sessions
+#   sessions-sessions  GPU + CPU prefix_pruning_on_sessions
+#
 # Usage:
 #   scripts/sweep_cpu_offload_eviction.sh
 #   scripts/sweep_cpu_offload_eviction.sh --config free-inf-mistral.yaml
 #   scripts/sweep_cpu_offload_eviction.sh --concurrencies 24 36 48
+#   scripts/sweep_cpu_offload_eviction.sh --scenarios lru-lru lru-sessions
+#   scripts/sweep_cpu_offload_eviction.sh --scenarios sessions-sessions --concurrencies 24
 #   scripts/sweep_cpu_offload_eviction.sh --duration 900 --warmup 300
 #   scripts/sweep_cpu_offload_eviction.sh --model mistralai/Ministral-3-8B-Reasoning-2512
 #   scripts/sweep_cpu_offload_eviction.sh --cpu-bytes 214748364800 --block-size 256
@@ -371,9 +378,7 @@ start_server() {
     echo
     printf 'CUDA_VISIBLE_DEVICES=%q PYTHONPATH=%q ' "${GPU}" "${VLLM_CODE_ROOT}"
     printf 'PATH=%q:"$PATH" ' "${VLLM_VENV_BIN}"
-    # PYTHONUNBUFFERED + stdbuf: when stdout is a file (not a TTY), Python
-    # block-buffers logs; without this the editor only sees updates on close/flush.
-    printf 'PYTHONUNBUFFERED=1 VLLM_ENGINE_READY_TIMEOUT_S=%q PYTHONHASHSEED=0 VLLM_SERVER_DEV_MODE=1' \
+    printf 'PYTHONUNBUFFERED=1 VLLM_ENGINE_READY_TIMEOUT_S=%q VLLM_KV_CONNECTOR_HIT_LOG=1 PYTHONHASHSEED=0 VLLM_SERVER_DEV_MODE=1' \
       "${VLLM_ENGINE_READY_TIMEOUT_S}"
     if [[ "${scenario}" == "sessions-sessions" ]]; then
       printf ' VLLM_SUFFIX_PRESERVING_EVICTION=1'
@@ -389,7 +394,6 @@ start_server() {
       printf ' VLLM_SUFFIX_SESSION_QUANTILE=%q' "${SESSION_QUANTILE}"
       printf ' VLLM_SUFFIX_SESSION_GAP_WINDOW=%q' "${SESSION_GAP_WINDOW}"
     fi
-    printf ' stdbuf -oL -eL'
     printf ' %s' "$(printf '%q ' "${serve_argv[@]}")"
     echo
   } >"${cmdfile}"
@@ -403,17 +407,23 @@ start_server() {
     return 0
   fi
 
-  cat "${cmdfile}" >"${logfile}"
-  echo "----- vLLM output below -----" >>"${logfile}"
-  # Line-buffered logging so an open vllm.log in the editor updates live.
-  CUDA_VISIBLE_DEVICES="${GPU}" \
-    PYTHONPATH="${VLLM_CODE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    PYTHONUNBUFFERED=1 \
-    VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S}" \
-    PYTHONHASHSEED=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    PATH="${VLLM_VENV_BIN}:${PATH}" \
-    setsid stdbuf -oL -eL "${serve_argv[@]}" >>"${logfile}" 2>&1 &
+  # Same pattern that live-updates in Cursor: single truncating redirect
+  # `> logfile 2>&1` (not append, not stdbuf). Header + server share one fd.
+  # Export PYTHONUNBUFFERED so EngineCore children inherit unbuffered stdio.
+  export CUDA_VISIBLE_DEVICES="${GPU}"
+  export PYTHONPATH="${VLLM_CODE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+  export PATH="${VLLM_VENV_BIN}:${PATH}"
+  export PYTHONUNBUFFERED=1
+  export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S}"
+  export VLLM_KV_CONNECTOR_HIT_LOG=1
+  export PYTHONHASHSEED=0
+  export VLLM_SERVER_DEV_MODE=1
+  setsid bash -c '
+    cat "$1"
+    echo "----- vLLM output below -----"
+    shift
+    exec "$@"
+  ' bash "${cmdfile}" "${serve_argv[@]}" >"${logfile}" 2>&1 &
   SERVE_PID=$!
 }
 
@@ -486,7 +496,7 @@ for CONC in "${CONCURRENCIES[@]}"; do
       PYTHONUNBUFFERED=1 ${INFER_CMD} -c "${CONFIG}" \
         --load.stages "${stages_json}" \
         --storage.local_storage.path "${out}"
-    ) 2>&1 | stdbuf -oL -eL tee "${out}/inference-perf.log"
+    ) 2>&1 | tee "${out}/inference-perf.log"
 
     echo "    stopping vLLM"
     stop_server
