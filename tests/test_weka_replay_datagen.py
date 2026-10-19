@@ -88,6 +88,28 @@ def test_hash_id_random_generator() -> None:
     val3_a = rng3.randrange(1000)
     assert val3_a != val1_a
 
+    # Session scope: different trace_ids diverge for the same hash_id
+    rng_session_a = HashIdRandomGenerator(base_seed=42)
+    rng_session_a.set_trace_id("trace_a")
+    rng_session_a.reseed_for_hash_id(1001)
+    session_a = rng_session_a.randrange(1000)
+    rng_session_b = HashIdRandomGenerator(base_seed=42)
+    rng_session_b.set_trace_id("trace_b")
+    rng_session_b.reseed_for_hash_id(1001)
+    session_b = rng_session_b.randrange(1000)
+    assert session_a != session_b
+
+    # Global scope (empty trace_id): same hash_id is identical across sessions
+    rng_global_a = HashIdRandomGenerator(base_seed=42)
+    rng_global_a.set_trace_id("")
+    rng_global_a.reseed_for_hash_id(1001)
+    global_a = rng_global_a.randrange(1000)
+    rng_global_b = HashIdRandomGenerator(base_seed=42)
+    rng_global_b.set_trace_id("")
+    rng_global_b.reseed_for_hash_id(1001)
+    global_b = rng_global_b.randrange(1000)
+    assert global_a == global_b
+
 
 def test_idle_gap_time_warp() -> None:
     # Gap cap = 10s

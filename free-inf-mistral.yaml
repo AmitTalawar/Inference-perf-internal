@@ -16,11 +16,11 @@ api:
   streaming: true
 server:
   type: vllm
-  model_name: mistralai/Ministral-3-8B-Reasoning-2512
+  model_name: mistralai/Ministral-3-8B-Instruct-2512
   base_url: http://localhost:8000
   verify_ssl: false
 tokenizer:
-  pretrained_model_name_or_path: mistralai/Ministral-3-8B-Reasoning-2512
+  pretrained_model_name_or_path: mistralai/Ministral-3-8B-Instruct-2512
   fix_mistral_regex: true
 data:
   type: weka_trace_replay
@@ -30,12 +30,12 @@ data:
     num_dataset_entries: 200
     duplicate_sessions_target: 200
     min_events: 100
-    compiled_store_path: "/home/ubuntu/dev/Inference-perf-internal/compiled-artifacts-mistral-2"
+    compiled_store_path: "/home/ubuntu/dev/Inference-perf-internal/compiled-artifacts-mistral-instruct"
     compile_parallelism_mode: "process"
     compile_workers: 128
     compile_inflight_limit: 128
     use_static_model: true
-    static_model_name: "mistralai/Ministral-3-8B-Reasoning-2512"
+    static_model_name: "mistralai/Ministral-3-8B-Instruct-2512"
     default_block_size: 64
     skip_invalid_files: true
     clamp_substituted_output_to_recorded: true

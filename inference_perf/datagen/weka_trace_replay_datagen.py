@@ -27,10 +27,12 @@ hashes recorded in the trace.
 
 1. Turn-by-Turn Reconstructor:
    For every request (turn) in a session, the generator uses a deterministic `HashIdRandomGenerator`
-   seeded with a combination of base seed, conversation ID, and block hash ID. It samples words from
-   a static, public domain corpus (Shakespeare) to construct the prompt and expected assistant response text.
-   This guarantees that if the same block hash ID is visited on different turns or worker processes,
-   it always maps to the exact same text tokens, producing identical KV-cache keys on the server.
+   seeded with base seed and block hash ID (plus conversation ID when ``hash_id_scope`` is
+   ``session``). It samples words from a static, public domain corpus (Shakespeare) to construct
+   the prompt and expected assistant response text.
+   This guarantees that if the same block hash ID is visited on different turns or worker processes
+   (and, for ``hash_id_scope: global``, across sessions), it always maps to the exact same text
+   tokens, producing identical KV-cache keys on the server.
 
 2. Longest Common Prefix (LCP) and Branching:
    During multi-turn conversations, the user may shift topics or backtrack. The generator compares
@@ -142,6 +144,9 @@ class WekaTrace(BaseModel):
     id: str
     models: List[str]
     block_size: int
+    # "global": same hash_id => same content across sessions (cross-session prefix reuse).
+    # "session": hash_ids are only meaningful within a trace (classic Weka default).
+    hash_id_scope: Literal["global", "session"] = "session"
     tool_tokens: int = 0
     system_tokens: int = 0
     session_headers: Optional[Dict[str, str]] = None
@@ -231,7 +236,13 @@ class _IdleGapTimeWarp:
 
 
 class HashIdRandomGenerator:
-    """Deterministic random generator scoped per (trace_id, hash_id)."""
+    """Deterministic random generator scoped per (hash_id) or (trace_id, hash_id).
+
+    For ``hash_id_scope: global`` traces, leave ``trace_id`` empty so the same hash_id
+    yields identical tokens across sessions (enabling cross-session prefix reuse).
+    For ``hash_id_scope: session``, set ``trace_id`` to the conversation id so numeric
+    hash collisions across sessions do not alias content.
+    """
 
     def __init__(self, base_seed: int):
         self.base_seed = base_seed
@@ -694,7 +705,12 @@ def _reconstruct_raw_calls_shared(
 ) -> List[RawCall]:
     cache: Dict[int, List[int]] = {}
     hash_id_rng = HashIdRandomGenerator(base_seed)
-    hash_id_rng.set_trace_id(trace.id)
+    # Global scope: omit trace_id so shared hash_ids synthesize identical blocks across sessions.
+    # Session scope: keep per-trace seeding (classic Weka hash namespaces).
+    if trace.hash_id_scope == "global":
+        hash_id_rng.set_trace_id("")
+    else:
+        hash_id_rng.set_trace_id(trace.id)
     corpus_size = len(tokenized_corpus)
 
     configured = model_mapping or {}
