@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# Sweep concurrent_sessions across three CPU-offload eviction scenarios.
+# Sweep concurrent_sessions across CPU-offload eviction scenarios.
 #
-# For each concurrency in order, deploy scenarios one at a time:
-#   (i)   gpu-lru + cpu-lru
-#   (ii)  gpu-lru + cpu-prefix_pruning_on_sessions
-#   (iii) gpu-prefix_pruning_on_sessions + cpu-prefix_pruning_on_sessions
+# For each concurrency in order, deploy scenarios one at a time.
 #
 # Lifecycle per (concurrency, scenario):
 #   1. Stop any running vLLM server
 #   2. Clean /dev/shm leftover OffloadingConnector mmaps
-#   3. Unset GPU suffix-eviction env (then set it only for scenario iii)
+#   3. Unset GPU suffix-eviction env (then set it only for sessions-sessions)
 #   4. Start vLLM (CPUOffloadingSpec only — no FS secondary tier)
 #   5. Wait until /v1/models is ready
 #   6. Run inference-perf with stage overrides
@@ -22,20 +19,22 @@
 # WARNING: runs `rm -rf /dev/shm/*`. Do not run other /dev/shm workloads on
 # this host during the sweep.
 #
-# Scenarios (select with --scenarios; default runs all three in this order):
+# Scenarios (select with --scenarios; default runs all in this order):
 #   lru-lru            GPU native LRU + CPU LRU
 #   lru-sessions       GPU native LRU + CPU prefix_pruning_on_sessions
+#   lru-pin            GPU native LRU + CPU first_request_pin (+ CPU session TTL)
+#   lru-prefix         GPU native LRU + CPU prefix_pruning
 #   sessions-sessions  GPU + CPU prefix_pruning_on_sessions
 #
 # Usage:
 #   scripts/sweep_cpu_offload_eviction.sh
 #   scripts/sweep_cpu_offload_eviction.sh --config free-inf-mistral.yaml
 #   scripts/sweep_cpu_offload_eviction.sh --concurrencies 24 36 48
-#   scripts/sweep_cpu_offload_eviction.sh --scenarios lru-lru lru-sessions
+#   scripts/sweep_cpu_offload_eviction.sh --scenarios lru-lru lru-sessions lru-pin lru-prefix
 #   scripts/sweep_cpu_offload_eviction.sh --scenarios sessions-sessions --concurrencies 24
 #   scripts/sweep_cpu_offload_eviction.sh --duration 900 --warmup 300
 #   scripts/sweep_cpu_offload_eviction.sh --model mistralai/Ministral-3-8B-Instruct-2512
-#   scripts/sweep_cpu_offload_eviction.sh --cpu-bytes 214748364800 --block-size 256
+#   scripts/sweep_cpu_offload_eviction.sh --cpu-bytes 549755813888 --block-size 256
 #   scripts/sweep_cpu_offload_eviction.sh --cpu-cache-gb 200
 #   scripts/sweep_cpu_offload_eviction.sh --dry-run
 
@@ -111,11 +110,11 @@ GPU_FREE_WAIT_S="${GPU_FREE_WAIT_S:-30}"
 
 CONCURRENCIES=(24 30 36 48 64 80)
 # Scenario order is intentional and fixed.
-SCENARIOS=(lru-lru lru-sessions sessions-sessions)
+SCENARIOS=(lru-lru lru-sessions lru-pin lru-prefix sessions-sessions)
 DRY_RUN=0
 
 usage() {
-  sed -n '2,34p' "$0"
+  sed -n '2,40p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -218,6 +217,7 @@ set_gpu_session_eviction_env() {
 }
 
 # CPUOffloadingSpec only (no TieringOffloadingSpec / no FS secondary tier).
+# cpu_bytes_to_use always uses CPU_BYTES_TO_USE (default 549755813888).
 kv_transfer_config_for() {
   local scenario="$1"
   case "${scenario}" in
@@ -244,6 +244,39 @@ JSON
     "cpu_bytes_to_use": ${CPU_BYTES_TO_USE},
     "block_size": ${BLOCK_SIZE},
     "eviction_policy": "prefix_pruning_on_sessions",
+    "first_tier_tokens": ${PREFIX_TIER_TOKENS},
+    "tier_step_tokens": ${PREFIX_TIER_STEP_TOKENS},
+    "max_tiers": ${PREFIX_MAX_TIERS}
+  }
+}
+JSON
+      ;;
+    lru-pin)
+      # first_request_pin + CPU session TTL via VLLM_CPU_SESSION_TTL_{K,S}.
+      cat <<JSON
+{
+  "kv_connector": "OffloadingConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use": ${CPU_BYTES_TO_USE},
+    "block_size": ${BLOCK_SIZE},
+    "eviction_policy": "first_request_pin",
+    "first_tier_tokens": ${PREFIX_TIER_TOKENS},
+    "tier_step_tokens": ${PREFIX_TIER_STEP_TOKENS},
+    "max_tiers": ${PREFIX_MAX_TIERS}
+  }
+}
+JSON
+      ;;
+    lru-prefix)
+      cat <<JSON
+{
+  "kv_connector": "OffloadingConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use": ${CPU_BYTES_TO_USE},
+    "block_size": ${BLOCK_SIZE},
+    "eviction_policy": "prefix_pruning",
     "first_tier_tokens": ${PREFIX_TIER_TOKENS},
     "tier_step_tokens": ${PREFIX_TIER_STEP_TOKENS},
     "max_tiers": ${PREFIX_MAX_TIERS}
@@ -376,19 +409,29 @@ start_server() {
   clear_gpu_eviction_env
   if [[ "${scenario}" == "sessions-sessions" ]]; then
     set_gpu_session_eviction_env
+  else
+    # Explicit native GPU LRU (matches manual serve commands).
+    export VLLM_SUFFIX_PRESERVING_EVICTION=0
   fi
-  if [[ "${scenario}" == "lru-sessions" ]]; then
-    export VLLM_CPU_SESSION_TTL_K="${CPU_SESSION_TTL_K}"
-    export VLLM_CPU_SESSION_TTL_S="${CPU_SESSION_TTL_S}"
-  fi
+  case "${scenario}" in
+    lru-sessions|lru-pin)
+      export VLLM_CPU_SESSION_TTL_K="${CPU_SESSION_TTL_K}"
+      export VLLM_CPU_SESSION_TTL_S="${CPU_SESSION_TTL_S}"
+      ;;
+  esac
 
   local serve_argv=(
     "${VLLM_BIN}" serve "${MODEL}"
     --host "${VLLM_HOST}"
     --port "${PORT}"
+    --block-size "${BLOCK_SIZE}"
     --gpu-memory-utilization "${GPU_MEM_UTIL}"
     --max-model-len "${MAX_MODEL_LEN}"
     --enable-prefix-caching
+    --tensor-parallel-size 1
+    --tokenizer-mode mistral
+    --config-format mistral
+    --load-format mistral
     --kv-transfer-config "${kv_cfg}"
   )
 
@@ -408,22 +451,29 @@ start_server() {
       echo "#   VLLM_SUFFIX_SESSION_DEAD_TTL_S=${VLLM_SUFFIX_SESSION_DEAD_TTL_S}"
       echo "#   VLLM_SUFFIX_SESSION_DETECTOR=${VLLM_SUFFIX_SESSION_DETECTOR}"
     else
-      echo "# GPU eviction env: cleared (native GPU LRU)"
+      echo "# GPU eviction env: VLLM_SUFFIX_PRESERVING_EVICTION=0 (native GPU LRU)"
     fi
-    if [[ "${scenario}" == "lru-sessions" ]]; then
-      echo "# CPU session TTL env:"
-      echo "#   VLLM_CPU_SESSION_TTL_K=${CPU_SESSION_TTL_K}"
-      echo "#   VLLM_CPU_SESSION_TTL_S=${CPU_SESSION_TTL_S}"
-    fi
+    case "${scenario}" in
+      lru-sessions|lru-pin)
+        echo "# CPU session TTL env:"
+        echo "#   VLLM_CPU_SESSION_TTL_K=${CPU_SESSION_TTL_K}"
+        echo "#   VLLM_CPU_SESSION_TTL_S=${CPU_SESSION_TTL_S}"
+        ;;
+    esac
     echo
     printf 'CUDA_VISIBLE_DEVICES=%q PYTHONPATH=%q ' "${GPU}" "${VLLM_CODE_ROOT}"
     printf 'PATH=%q:"$PATH" ' "${VLLM_VENV_BIN}"
-    printf 'PYTHONUNBUFFERED=1 VLLM_ENGINE_READY_TIMEOUT_S=%q VLLM_KV_CONNECTOR_HIT_LOG=1 PYTHONHASHSEED=0 VLLM_SERVER_DEV_MODE=1' \
+    printf 'PYTHONUNBUFFERED=1 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ENGINE_READY_TIMEOUT_S=%q VLLM_KV_CONNECTOR_HIT_LOG=1 PYTHONHASHSEED=0 VLLM_SERVER_DEV_MODE=1' \
       "${VLLM_ENGINE_READY_TIMEOUT_S}"
-    if [[ "${scenario}" == "lru-sessions" ]]; then
-      printf ' VLLM_CPU_SESSION_TTL_K=%q VLLM_CPU_SESSION_TTL_S=%q' \
-        "${CPU_SESSION_TTL_K}" "${CPU_SESSION_TTL_S}"
+    if [[ "${scenario}" != "sessions-sessions" ]]; then
+      printf ' VLLM_SUFFIX_PRESERVING_EVICTION=0'
     fi
+    case "${scenario}" in
+      lru-sessions|lru-pin)
+        printf ' VLLM_CPU_SESSION_TTL_K=%q VLLM_CPU_SESSION_TTL_S=%q' \
+          "${CPU_SESSION_TTL_K}" "${CPU_SESSION_TTL_S}"
+        ;;
+    esac
     if [[ "${scenario}" == "sessions-sessions" ]]; then
       printf ' VLLM_SUFFIX_PRESERVING_EVICTION=1'
       printf ' VLLM_SUFFIX_EVICTION_TIER_TOKENS=%q' "${PREFIX_TIER_TOKENS}"
@@ -458,6 +508,7 @@ start_server() {
   export PYTHONPATH="${VLLM_CODE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
   export PATH="${VLLM_VENV_BIN}:${PATH}"
   export PYTHONUNBUFFERED=1
+  export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
   export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S}"
   export VLLM_KV_CONNECTOR_HIT_LOG=1
   export PYTHONHASHSEED=0

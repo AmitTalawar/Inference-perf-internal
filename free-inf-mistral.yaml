@@ -30,7 +30,7 @@ data:
     num_dataset_entries: 200
     duplicate_sessions_target: 200
     min_events: 100
-    compiled_store_path: "/home/ubuntu/dev/Inference-perf-internal/compiled-artifacts-mistral-instruct"
+    compiled_store_path: "/home/ubuntu/dev/Inference-perf-internal/compiled-artifacts-mistral-instruct-new"
     compile_parallelism_mode: "process"
     compile_workers: 128
     compile_inflight_limit: 128
